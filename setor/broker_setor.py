@@ -161,7 +161,14 @@ def processar_alerta(msg: dict):
         ts,
     )
 
-    # Dispara a requisição para as bases operacionais
+    empresa_id = msg.get("empresa_id")
+    custo = calcular_custo(msg.get("criticidade"))
+    
+    ok = ledger_client.debitar(empresa_id, custo, id_transacao=requisicao.id_requisicao)
+    if not ok:
+        logger.warning("[%s] Empresa %s sem saldo suficiente. Requisição rejeitada.", SETOR_ID, empresa_id)
+        return  # NÃO faz broadcast
+    
     broadcast_com_retry(payload)
 
     # Avisa o painel web apenas para fins de visualização na interface (fire-and-forget)

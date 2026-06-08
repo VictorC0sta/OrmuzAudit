@@ -13,6 +13,8 @@ class MensagemAlerta:
     setor_id: str
     criticidade: str
     tipo_ocorrencia: str
+    empresa_id: str         
+    carteira_id: str
     # Cria um código único e aleatório para este alerta automaticamente
     id_alerta: str = field(default_factory=lambda: str(uuid.uuid4()))
     tipo: str = TipoMensagem.ALERTA.value

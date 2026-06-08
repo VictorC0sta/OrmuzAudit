@@ -1,0 +1,14 @@
+{
+  "CRITICA": {
+    "tokens": 3,
+    "descricao": "Embarcação em perigo imediato, explosivo"
+  },
+  "ALTA": {
+    "tokens": 2,
+    "descricao": "Bloqueio de rota, objeto não identificado"
+  },
+  "BAIXA": {
+    "tokens": 1,
+    "descricao": "Anomalia menor, falha de sinalização"
+  }
+}

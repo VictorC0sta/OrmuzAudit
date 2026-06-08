@@ -45,6 +45,10 @@ PORTA_BROKER_SETOR = int(os.environ.get("PORTA_BROKER_SETOR", 5050))
 INTERVALO_MIN = float(os.environ.get("INTERVALO_MIN", 5))
 INTERVALO_MAX = float(os.environ.get("INTERVALO_MAX", 15))
 
+# Informações empresariais 
+EMPRESA_ID = os.environ.get("EMPRESA_ID", "EMPRESA-A")
+CARTEIRA_ID = os.environ.get("CARTEIRA_ID", "wallet-abc123")
+
 
 # ── Distribuição de Probabilidade ─────────────────────────────────────────────
 # Simula a realidade: eventos críticos são raros, eventos menores são frequentes.
