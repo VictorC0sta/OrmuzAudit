@@ -9,6 +9,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S1"
       SETOR_ID: "S1"
+      EMPRESA_ID: "${EMPRESA_S1_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S1_ID:-wallet-s1}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S1}"
       INTERVALO_MIN: "5"
@@ -25,6 +27,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S2"
       SETOR_ID: "S2"
+      EMPRESA_ID: "${EMPRESA_S2_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S2_ID:-wallet-s2}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S2}"
       INTERVALO_MIN: "5"
@@ -41,6 +45,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S3"
       SETOR_ID: "S3"
+      EMPRESA_ID: "${EMPRESA_S3_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S3_ID:-wallet-s3}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S3}"
       INTERVALO_MIN: "5"
@@ -57,6 +63,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S4"
       SETOR_ID: "S4"
+      EMPRESA_ID: "${EMPRESA_S4_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S4_ID:-wallet-s4}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S4}"
       INTERVALO_MIN: "5"
@@ -73,6 +81,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S5"
       SETOR_ID: "S5"
+      EMPRESA_ID: "${EMPRESA_S5_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S5_ID:-wallet-s5}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S5}"
       INTERVALO_MIN: "5"
@@ -89,6 +99,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S6"
       SETOR_ID: "S6"
+      EMPRESA_ID: "${EMPRESA_S6_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S6_ID:-wallet-s6}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S6}"
       INTERVALO_MIN: "5"
@@ -105,6 +117,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S7"
       SETOR_ID: "S7"
+      EMPRESA_ID: "${EMPRESA_S7_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S7_ID:-wallet-s7}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S7}"
       INTERVALO_MIN: "5"
@@ -121,6 +135,8 @@ services:
     environment:
       SENSOR_ID: "SENSOR-S8"
       SETOR_ID: "S8"
+      EMPRESA_ID: "${EMPRESA_S8_ID:-EMPRESA-A}"
+      CARTEIRA_ID: "${CARTEIRA_S8_ID:-wallet-s8}"
       IP_BROKER_SETOR: "${IP_PC_SETORES}"
       PORTA_BROKER_SETOR: "${PORTA_S8}"
       INTERVALO_MIN: "5"

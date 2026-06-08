@@ -14,11 +14,14 @@ import time
 import logging
 from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
+import json
 
-# Adiciona a pasta "shared" no path para importar módulos comuns
+# Adiciona pastas no path para importar módulos comuns
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
 
 # pylint: disable=import-error, wrong-import-position
+from ledger_client import ledger as ledger_client
 from protocolo import notificar_monitor, criar_servidor_tcp, tcp_receber_completo, tcp_broadcast
 from constantes import TipoMensagem
 from mensagens import MensagemRequisicao
@@ -66,6 +69,13 @@ BASES: list[tuple[str, int]] = [
     (IP_BASE_OESTE, PORTA_BASE_OESTE),
 ]
 
+
+_CAMINHO_CUSTO = os.path.join(os.path.dirname(__file__), "..", "config", "custo_por_criticidade.json")
+with open(_CAMINHO_CUSTO, "r", encoding="utf-8") as _f:
+    _CUSTO_POR_CRIT = json.load(_f)
+
+def calcular_custo(criticidade: str) -> int:
+    return _CUSTO_POR_CRIT.get(criticidade, {}).get("tokens", 1)
 # ── Instâncias Globais ────────────────────────────────────────────────────────
 
 # O Relógio de Lamport carimba cada nova requisição com um número sequencial,
@@ -129,25 +139,19 @@ def broadcast_com_retry(payload: dict) -> dict[str, bool]:
 # ── Processamento de Dados ────────────────────────────────────────────────────
 
 def processar_alerta(msg: dict):
-    """
-    Transforma um "Alerta" (dado bruto do sensor) em uma "Requisição" (ordem formal).
-    Injeta o timestamp lógico e envia para a rede das bases.
-    """
     tipo = msg.get("tipo")
 
     if tipo != TipoMensagem.ALERTA.value:
         logger.warning("[%s] Mensagem ignorada — tipo inesperado: %s", SETOR_ID, tipo)
         return
 
-    # Incrementa o relógio interno deste broker
     ts = clock.incrementar()
 
-    # Monta o pacote oficial que as bases irão disputar
     requisicao = MensagemRequisicao(
-        id_setor         = SETOR_ID,
-        timestamp_logico = ts,
-        criticidade      = msg.get("criticidade", "BAIXA"),
-        tipo_ocorrencia  = msg.get("tipo_ocorrencia", "anomalia_menor"),
+        id_setor=SETOR_ID,
+        timestamp_logico=ts,
+        criticidade=msg.get("criticidade", "BAIXA"),
+        tipo_ocorrencia=msg.get("tipo_ocorrencia", "anomalia_menor"),
     )
 
     payload = asdict(requisicao)
@@ -161,26 +165,24 @@ def processar_alerta(msg: dict):
         ts,
     )
 
+    # ── CORRIGIDO: removido id_transacao= (kwarg inexistente) ──
     empresa_id = msg.get("empresa_id")
     custo = calcular_custo(msg.get("criticidade"))
-    
-    ok = ledger_client.debitar(empresa_id, custo, id_transacao=requisicao.id_requisicao)
+    ok = ledger_client.debitar(empresa_id, custo, requisicao.id_requisicao)
     if not ok:
         logger.warning("[%s] Empresa %s sem saldo suficiente. Requisição rejeitada.", SETOR_ID, empresa_id)
-        return  # NÃO faz broadcast
-    
+        return
+
     broadcast_com_retry(payload)
 
-    # Avisa o painel web apenas para fins de visualização na interface (fire-and-forget)
     notificar_monitor({
         "tipo": "ALERTA_GERADO",
         "setor": SETOR_ID,
         "criticidade": requisicao.criticidade,
-        "tipo_ocorrencia": requisicao.tipo_ocorrencia, 
-        "id_requisicao": requisicao.id_requisicao,       
-        "timestamp_logico": ts,                          
+        "tipo_ocorrencia": requisicao.tipo_ocorrencia,
+        "id_requisicao": requisicao.id_requisicao,
+        "timestamp_logico": ts,
     })
-
 
 # ── Servidor TCP (Recepção dos Sensores) ──────────────────────────────────────
 

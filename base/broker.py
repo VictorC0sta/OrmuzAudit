@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
 
 # pylint: disable=import-error, wrong-import-position
+from ledger_client import ledger as ledger_client
 from protocolo import notificar_monitor
 from constantes import (
     TipoMensagem, EstadoDrone, StatusRequisicao, Criticidade,
@@ -233,7 +234,17 @@ def _processar_heartbeat_tcp(msg: dict) -> None:
     if missao_concluida:
         estado.marcar_concluida(missao_concluida)
         logger.info("[%s] Missão %s concluída pelo drone %s.", BASE_ID, missao_concluida[:8], drone_id)
-        
+
+        # ── NOVO: registrar conclusão no ledger ──
+        entrada = estado.obter_entrada(missao_concluida)
+        if entrada:
+            ledger_client.registrar_conclusao(
+                id_requisicao=missao_concluida,
+                drone_id=drone_id,
+                base_id=BASE_ID,
+                setor_id=entrada.id_setor,
+            )
+
         # Como o drone agora está livre, tenta puxar alguma ocorrência da fila de espera
         threading.Thread(target=_processar_fila_pendente, daemon=True).start()
 
