@@ -78,7 +78,11 @@ class LedgerClient:
         try:
             # fabric-sdk-py: import aqui para não quebrar o restante do projeto
             # se o SDK não estiver instalado no ambiente de desenvolvimento
-            import hfc.fabric as hfc  # type: ignore
+            try:
+                import hfc.fabric as hfc  # type: ignore
+            except ImportError as ie:
+                logger.error("[LedgerClient] Falha ao importar fabric-sdk-py: %s. Execute: pip install fabric-sdk-py", ie)
+                return False
 
             # Carrega o perfil de conexão gerado pelo fabric/setup.sh
             with open(CONNECTION_PROFILE, "r", encoding="utf-8") as f:
