@@ -1,0 +1,186 @@
+# docker/docker-compose.fabric.yml
+# Sobe a rede Hyperledger Fabric:
+#   1 Orderer + 4 Peers (1 por organização) + 4 CAs
+#
+# Execute a partir da raiz do projeto:
+#   docker compose -f docker/docker-compose.fabric.yml up -d
+
+version: '3.8'
+
+networks:
+  ormuz_fabric:
+    driver: bridge
+
+volumes:
+  orderer.ormuz.com:
+  peer0.norte.ormuz.com:
+  peer0.sul.ormuz.com:
+  peer0.leste.ormuz.com:
+  peer0.oeste.ormuz.com:
+
+services:
+
+  # ── Orderer ────────────────────────────────────────────────────────────────
+  orderer.ormuz.com:
+    image: hyperledger/fabric-orderer:2.5
+    container_name: orderer.ormuz.com
+    environment:
+      - FABRIC_LOGGING_SPEC=INFO
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_LISTENPORT=7050
+      - ORDERER_GENERAL_GENESISMETHOD=file
+      - ORDERER_GENERAL_GENESISFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=false
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric
+    command: orderer
+    volumes:
+      - ../fabric/channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer.ormuz.com/msp:/var/hyperledger/orderer/msp
+      - orderer.ormuz.com:/var/hyperledger/production/orderer
+    ports:
+      - "7050:7050"
+    networks:
+      - ormuz_fabric
+
+  # ── Peer OrgNorte ──────────────────────────────────────────────────────────
+  peer0.norte.ormuz.com:
+    image: hyperledger/fabric-peer:2.5
+    container_name: peer0.norte.ormuz.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=docker_ormuz_fabric
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_ID=peer0.norte.ormuz.com
+      - CORE_PEER_ADDRESS=peer0.norte.ormuz.com:7051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:7051
+      - CORE_PEER_CHAINCODEADDRESS=peer0.norte.ormuz.com:7052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:7052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.norte.ormuz.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.norte.ormuz.com:7051
+      - CORE_PEER_LOCALMSPID=OrgNorteMSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../fabric/crypto-config/peerOrganizations/norte.ormuz.com/peers/peer0.norte.ormuz.com/msp:/etc/hyperledger/fabric/msp
+      - peer0.norte.ormuz.com:/var/hyperledger/production
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    ports:
+      - "7051:7051"
+    networks:
+      - ormuz_fabric
+
+  # ── Peer OrgSul ────────────────────────────────────────────────────────────
+  peer0.sul.ormuz.com:
+    image: hyperledger/fabric-peer:2.5
+    container_name: peer0.sul.ormuz.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=docker_ormuz_fabric
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_ID=peer0.sul.ormuz.com
+      - CORE_PEER_ADDRESS=peer0.sul.ormuz.com:8051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:8051
+      - CORE_PEER_CHAINCODEADDRESS=peer0.sul.ormuz.com:8052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:8052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.sul.ormuz.com:8051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.sul.ormuz.com:8051
+      - CORE_PEER_LOCALMSPID=OrgSulMSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../fabric/crypto-config/peerOrganizations/sul.ormuz.com/peers/peer0.sul.ormuz.com/msp:/etc/hyperledger/fabric/msp
+      - peer0.sul.ormuz.com:/var/hyperledger/production
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    ports:
+      - "8051:8051"
+    networks:
+      - ormuz_fabric
+
+  # ── Peer OrgLeste ──────────────────────────────────────────────────────────
+  peer0.leste.ormuz.com:
+    image: hyperledger/fabric-peer:2.5
+    container_name: peer0.leste.ormuz.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=docker_ormuz_fabric
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_ID=peer0.leste.ormuz.com
+      - CORE_PEER_ADDRESS=peer0.leste.ormuz.com:9051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:9051
+      - CORE_PEER_CHAINCODEADDRESS=peer0.leste.ormuz.com:9052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:9052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.leste.ormuz.com:9051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.leste.ormuz.com:9051
+      - CORE_PEER_LOCALMSPID=OrgLesteMSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../fabric/crypto-config/peerOrganizations/leste.ormuz.com/peers/peer0.leste.ormuz.com/msp:/etc/hyperledger/fabric/msp
+      - peer0.leste.ormuz.com:/var/hyperledger/production
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    ports:
+      - "9051:9051"
+    networks:
+      - ormuz_fabric
+
+  # ── Peer OrgOeste ──────────────────────────────────────────────────────────
+  peer0.oeste.ormuz.com:
+    image: hyperledger/fabric-peer:2.5
+    container_name: peer0.oeste.ormuz.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=docker_ormuz_fabric
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_ID=peer0.oeste.ormuz.com
+      - CORE_PEER_ADDRESS=peer0.oeste.ormuz.com:10051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:10051
+      - CORE_PEER_CHAINCODEADDRESS=peer0.oeste.ormuz.com:10052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:10052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.oeste.ormuz.com:10051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.oeste.ormuz.com:10051
+      - CORE_PEER_LOCALMSPID=OrgOesteMSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../fabric/crypto-config/peerOrganizations/oeste.ormuz.com/peers/peer0.oeste.ormuz.com/msp:/etc/hyperledger/fabric/msp
+      - peer0.oeste.ormuz.com:/var/hyperledger/production
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    ports:
+      - "10051:10051"
+    networks:
+      - ormuz_fabric
+
+  # ── CLI (ferramenta de linha de comando para administração) ────────────────
+  cli:
+    image: hyperledger/fabric-tools:2.5
+    container_name: cli
+    tty: true
+    stdin_open: true
+    environment:
+      - GOPATH=/opt/gopath
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_ID=cli
+      - CORE_PEER_ADDRESS=peer0.norte.ormuz.com:7051
+      - CORE_PEER_LOCALMSPID=OrgNorteMSP
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/users/Admin@norte.ormuz.com/msp
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: /bin/bash
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../fabric/crypto-config:/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto
+      - ../fabric/channel-artifacts:/opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts
+      - ../chaincode:/opt/gopath/src/github.com/hyperledger/fabric/peer/chaincode
+    networks:
+      - ormuz_fabric

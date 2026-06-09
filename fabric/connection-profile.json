@@ -1,0 +1,110 @@
+{
+  "name": "ormuz-network",
+  "version": "1.0.0",
+
+  "client": {
+    "organization": "OrgNorte",
+    "connection": {
+      "timeout": {
+        "peer": { "endorser": "300" },
+        "orderer": "300"
+      }
+    }
+  },
+
+  "channels": {
+    "ormuz-channel": {
+      "orderers": ["orderer.ormuz.com"],
+      "peers": {
+        "peer0.norte.ormuz.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "eventSource": true
+        },
+        "peer0.sul.ormuz.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "eventSource": false
+        },
+        "peer0.leste.ormuz.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": false,
+          "ledgerQuery": false,
+          "eventSource": false
+        },
+        "peer0.oeste.ormuz.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": false,
+          "ledgerQuery": false,
+          "eventSource": false
+        }
+      }
+    }
+  },
+
+  "organizations": {
+    "OrgNorte": {
+      "mspid": "OrgNorteMSP",
+      "peers": ["peer0.norte.ormuz.com"],
+      "certificateAuthorities": []
+    },
+    "OrgSul": {
+      "mspid": "OrgSulMSP",
+      "peers": ["peer0.sul.ormuz.com"],
+      "certificateAuthorities": []
+    },
+    "OrgLeste": {
+      "mspid": "OrgLesteMSP",
+      "peers": ["peer0.leste.ormuz.com"],
+      "certificateAuthorities": []
+    },
+    "OrgOeste": {
+      "mspid": "OrgOesteMSP",
+      "peers": ["peer0.oeste.ormuz.com"],
+      "certificateAuthorities": []
+    }
+  },
+
+  "orderers": {
+    "orderer.ormuz.com": {
+      "url": "grpc://orderer.ormuz.com:7050",
+      "grpcOptions": {
+        "ssl-target-name-override": "orderer.ormuz.com",
+        "grpc-max-send-message-length": -1
+      }
+    }
+  },
+
+  "peers": {
+    "peer0.norte.ormuz.com": {
+      "url": "grpc://peer0.norte.ormuz.com:7051",
+      "grpcOptions": {
+        "ssl-target-name-override": "peer0.norte.ormuz.com",
+        "grpc.keepalive_time_ms": 600000
+      }
+    },
+    "peer0.sul.ormuz.com": {
+      "url": "grpc://peer0.sul.ormuz.com:8051",
+      "grpcOptions": {
+        "ssl-target-name-override": "peer0.sul.ormuz.com",
+        "grpc.keepalive_time_ms": 600000
+      }
+    },
+    "peer0.leste.ormuz.com": {
+      "url": "grpc://peer0.leste.ormuz.com:9051",
+      "grpcOptions": {
+        "ssl-target-name-override": "peer0.leste.ormuz.com",
+        "grpc.keepalive_time_ms": 600000
+      }
+    },
+    "peer0.oeste.ormuz.com": {
+      "url": "grpc://peer0.oeste.ormuz.com:10051",
+      "grpcOptions": {
+        "ssl-target-name-override": "peer0.oeste.ormuz.com",
+        "grpc.keepalive_time_ms": 600000
+      }
+    }
+  }
+}
