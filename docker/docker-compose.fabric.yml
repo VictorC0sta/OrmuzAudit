@@ -1,7 +1,6 @@
 # docker/docker-compose.fabric.yml
 # Sobe a rede Hyperledger Fabric:
-#   1 Orderer + 4 Peers (1 por organização) + 4 CAs
-#
+#   3 Orderers (cluster Raft) + 4 Peers (1 por organização) + CLI
 # Execute a partir da raiz do projeto:
 #   docker compose -f docker/docker-compose.fabric.yml up -d
 
@@ -12,7 +11,9 @@ networks:
     driver: bridge
 
 volumes:
-  orderer.ormuz.com:
+  orderer1.ormuz.com:
+  orderer2.ormuz.com:
+  orderer3.ormuz.com:
   peer0.norte.ormuz.com:
   peer0.sul.ormuz.com:
   peer0.leste.ormuz.com:
@@ -20,27 +21,97 @@ volumes:
 
 services:
 
-  # ── Orderer ────────────────────────────────────────────────────────────────
-  orderer.ormuz.com:
+  # ── Orderer 1 (Raft) ─────────────────────────────────────────────────────
+  orderer1.ormuz.com:
     image: hyperledger/fabric-orderer:2.5
-    container_name: orderer.ormuz.com
+    container_name: orderer1.ormuz.com
     environment:
       - FABRIC_LOGGING_SPEC=INFO
       - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
       - ORDERER_GENERAL_LISTENPORT=7050
-      - ORDERER_GENERAL_GENESISMETHOD=file
-      - ORDERER_GENERAL_GENESISFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_BOOTSTRAPMETHOD=file
+      - ORDERER_GENERAL_BOOTSTRAPFILE=/var/hyperledger/orderer/orderer.genesis.block
       - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
       - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
-      - ORDERER_GENERAL_TLS_ENABLED=false
+      # TLS é obrigatório: o cluster Raft conversa pela mesma porta gRPC
+      - ORDERER_GENERAL_TLS_ENABLED=true
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_CLUSTER_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
     working_dir: /opt/gopath/src/github.com/hyperledger/fabric
     command: orderer
     volumes:
       - ../fabric/channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
-      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer.ormuz.com/msp:/var/hyperledger/orderer/msp
-      - orderer.ormuz.com:/var/hyperledger/production/orderer
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/msp:/var/hyperledger/orderer/msp
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls:/var/hyperledger/orderer/tls
+      - orderer1.ormuz.com:/var/hyperledger/production/orderer
     ports:
       - "7050:7050"
+    networks:
+      - ormuz_fabric
+
+  # ── Orderer 2 (Raft) ─────────────────────────────────────────────────────
+  orderer2.ormuz.com:
+    image: hyperledger/fabric-orderer:2.5
+    container_name: orderer2.ormuz.com
+    environment:
+      - FABRIC_LOGGING_SPEC=INFO
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_LISTENPORT=8050
+      - ORDERER_GENERAL_BOOTSTRAPMETHOD=file
+      - ORDERER_GENERAL_BOOTSTRAPFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=true
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_CLUSTER_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric
+    command: orderer
+    volumes:
+      - ../fabric/channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer2.ormuz.com/msp:/var/hyperledger/orderer/msp
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer2.ormuz.com/tls:/var/hyperledger/orderer/tls
+      - orderer2.ormuz.com:/var/hyperledger/production/orderer
+    ports:
+      - "8050:8050"
+    networks:
+      - ormuz_fabric
+
+  # ── Orderer 3 (Raft) ─────────────────────────────────────────────────────
+  orderer3.ormuz.com:
+    image: hyperledger/fabric-orderer:2.5
+    container_name: orderer3.ormuz.com
+    environment:
+      - FABRIC_LOGGING_SPEC=INFO
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_LISTENPORT=9050
+      - ORDERER_GENERAL_BOOTSTRAPMETHOD=file
+      - ORDERER_GENERAL_BOOTSTRAPFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=true
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_CLUSTER_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric
+    command: orderer
+    volumes:
+      - ../fabric/channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer3.ormuz.com/msp:/var/hyperledger/orderer/msp
+      - ../fabric/crypto-config/ordererOrganizations/ormuz.com/orderers/orderer3.ormuz.com/tls:/var/hyperledger/orderer/tls
+      - orderer3.ormuz.com:/var/hyperledger/production/orderer
+    ports:
+      - "9050:9050"
     networks:
       - ormuz_fabric
 
@@ -175,6 +246,8 @@ services:
       - CORE_PEER_LOCALMSPID=OrgNorteMSP
       - CORE_PEER_TLS_ENABLED=false
       - CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/users/Admin@norte.ormuz.com/msp
+      # CA do orderer, usada pelos comandos com --cafile no setup.sh / init_ledger.sh
+      - ORDERER_CA=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/ca.crt
     working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
     command: /bin/bash
     volumes:

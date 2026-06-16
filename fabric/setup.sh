@@ -13,8 +13,12 @@ set -e  # Para tudo se qualquer comando falhar
 FABRIC_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$FABRIC_DIR")"
 
+# Caminho (dentro do container cli) do certificado de CA do orderer.
+# Qualquer um dos 3 nós serve aqui — todos compartilham a mesma CA da org.
+ORDERER_CA="/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/ca.crt"
+
 echo "========================================"
-echo "  ORMUZ — Setup da Rede Fabric"
+echo "  ORMUZ — Setup da Rede Fabric (Raft, 3 orderers)"
 echo "========================================"
 
 # ── 1. Limpeza de execuções anteriores ─────────────────────────────────────
@@ -28,22 +32,23 @@ mkdir -p "$FABRIC_DIR/channel-artifacts"
 
 # ── 2. Geração dos certificados criptográficos ──────────────────────────────
 echo ""
-echo "[2/6] Gerando certificados MSP (cryptogen)..."
+echo "[2/6] Gerando certificados MSP + TLS (cryptogen) para 3 orderers e 4 peers..."
 cd "$FABRIC_DIR"
 cryptogen generate --config=./crypto-config.yaml
 echo "  ✓ Certificados gerados em fabric/crypto-config/"
+echo "    (orderer1, orderer2, orderer3 — cada um com seu próprio par de chaves TLS)"
 
 # ── 3. Geração dos artefatos do channel ─────────────────────────────────────
 echo ""
-echo "[3/6] Gerando artefatos do channel (configtxgen)..."
+echo "[3/6] Gerando artefatos do channel (configtxgen) — bloco gênese já com os 3 consenters Raft..."
 export FABRIC_CFG_PATH="$FABRIC_DIR"
 
-# Bloco genesis do orderer
+# Bloco genesis do orderer (agora com OrdererType: etcdraft e 3 consenters)
 configtxgen \
   -profile OrmuzOrdererGenesis \
   -channelID system-channel \
   -outputBlock "$FABRIC_DIR/channel-artifacts/genesis.block"
-echo "  ✓ genesis.block criado"
+echo "  ✓ genesis.block criado (consenter set: orderer1, orderer2, orderer3)"
 
 # Transação de criação do channel
 configtxgen \
@@ -64,12 +69,12 @@ done
 
 # ── 4. Subir containers ─────────────────────────────────────────────────────
 echo ""
-echo "[4/6] Subindo containers Docker (orderer + 4 peers + cli)..."
+echo "[4/6] Subindo containers Docker (3 orderers Raft + 4 peers + cli)..."
 cd "$PROJECT_ROOT/docker"
 docker compose -f docker-compose.fabric.yml up -d
 echo "  ✓ Containers iniciados"
-echo "  Aguardando 10s para estabilizar..."
-sleep 10
+echo "  Aguardando 15s para o cluster Raft eleger um líder..."
+sleep 15
 
 # ── 5. Criar channel e fazer join dos peers ─────────────────────────────────
 echo ""
@@ -88,15 +93,20 @@ peer_exec() {
     "$@"
 }
 
-# OrgNorte cria o channel
+# OrgNorte cria o channel — agora com --tls true --cafile apontando pro
+# certificado de CA do orderer, exigido pelo cluster Raft.
+# Pode-se apontar para orderer1, orderer2 OU orderer3: qualquer um aceita
+# a submissão e, se não for o líder, encaminha internamente para quem for.
 peer_exec "norte.ormuz.com" "peer0.norte.ormuz.com:7051" "OrgNorteMSP" \
   peer channel create \
-    -o orderer.ormuz.com:7050 \
+    -o orderer1.ormuz.com:7050 \
     -c ormuz-channel \
-    -f /opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts/ormuz-channel.tx
-echo "  ✓ Channel 'ormuz-channel' criado"
+    -f /opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts/ormuz-channel.tx \
+    --tls true \
+    --cafile "$ORDERER_CA"
+echo "  ✓ Channel 'ormuz-channel' criado (via orderer1, replicado nos 3 nós Raft)"
 
-# Cada peer entra no channel
+# Cada peer entra no channel (não fala com o orderer — só local, sem TLS)
 declare -A PEERS=(
   ["norte.ormuz.com"]="peer0.norte.ormuz.com:7051 OrgNorteMSP"
   ["sul.ormuz.com"]="peer0.sul.ormuz.com:8051 OrgSulMSP"
@@ -123,7 +133,7 @@ docker exec cli \
     --label token_v1
 echo "  ✓ Chaincode empacotado"
 
-# Instala em cada peer
+# Instala em cada peer (operação local, sem TLS/orderer envolvido)
 for DOMAIN in "${!PEERS[@]}"; do
   read -r ADDR MSP <<< "${PEERS[$DOMAIN]}"
   peer_exec "$DOMAIN" "$ADDR" "$MSP" \
@@ -137,28 +147,32 @@ PKG_ID=$(docker exec cli \
   | grep "token_v1" | awk -F 'Package ID: ' '{print $2}' | awk -F ',' '{print $1}')
 echo "  Package ID: $PKG_ID"
 
-# Cada organização aprova o chaincode
+# Cada organização aprova o chaincode (operação local — não fala com o orderer)
 for DOMAIN in "${!PEERS[@]}"; do
   read -r ADDR MSP <<< "${PEERS[$DOMAIN]}"
   peer_exec "$DOMAIN" "$ADDR" "$MSP" \
     peer lifecycle chaincode approveformyorg \
-      -o orderer.ormuz.com:7050 \
+      -o orderer1.ormuz.com:7050 \
       --channelID ormuz-channel \
       --name token_contract \
       --version 1.0 \
       --package-id "$PKG_ID" \
-      --sequence 1
+      --sequence 1 \
+      --tls true \
+      --cafile "$ORDERER_CA"
   echo "  ✓ ${MSP} aprovou o chaincode"
 done
 
-# Commit do chaincode no channel
+# Commit do chaincode no channel — fala com o orderer, precisa de --tls/--cafile
 peer_exec "norte.ormuz.com" "peer0.norte.ormuz.com:7051" "OrgNorteMSP" \
   peer lifecycle chaincode commit \
-    -o orderer.ormuz.com:7050 \
+    -o orderer1.ormuz.com:7050 \
     --channelID ormuz-channel \
     --name token_contract \
     --version 1.0 \
     --sequence 1 \
+    --tls true \
+    --cafile "$ORDERER_CA" \
     --peerAddresses peer0.norte.ormuz.com:7051 \
     --peerAddresses peer0.sul.ormuz.com:8051 \
     --peerAddresses peer0.leste.ormuz.com:9051 \
@@ -167,6 +181,11 @@ echo "  ✓ Chaincode commitado no channel"
 
 echo ""
 echo "========================================"
-echo "  Rede Fabric pronta!"
+echo "  Rede Fabric pronta! (cluster Raft: orderer1, orderer2, orderer3)"
+echo "  Teste de tolerância a falhas sugerido:"
+echo "    docker stop orderer2.ormuz.com"
+echo "    # repita um 'peer chaincode invoke' qualquer — deve continuar funcionando"
+echo "    docker start orderer2.ormuz.com"
+echo ""
 echo "  Próximo passo: bash fabric/init_ledger.sh"
 echo "========================================"
