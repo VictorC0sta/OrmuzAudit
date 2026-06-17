@@ -121,16 +121,29 @@ class LedgerClient:
 
     # ── Operações financeiras ─────────────────────────────────────────────────
 
-    def consultar_saldo(self, empresa_id: str) -> Optional[int]:
-        if not self._reconectar_se_necessario(): return None
+    def consultar_saldo(self, empresa_id: str) -> Tuple[Optional[int], str]:
+        """
+        Retorna (saldo, status).
+        Status possíveis: "OK", "NAO_ENCONTRADA", "ERRO_REDE".
+        """
+        if not self._reconectar_se_necessario(): 
+            return None, "ERRO_REDE"
+        
         try:
             resultado = self._query(self.CC_FN_SALDO, [empresa_id]) or {}
-            saldo = resultado.get("saldo")
-            return int(saldo) if saldo is not None else None
+            if "saldo" in resultado:
+                return int(resultado["saldo"]), "OK"
+            return None, "NAO_ENCONTRADA"
+            
         except Exception as e:
-            logger.error("[LedgerClient] Erro saldo | emp=%s: %s", empresa_id, e)
+            erro = str(e).lower()
+            # Diferencia falha real de negócio de falha técnica de rede
+            if "nao existe" in erro or "not found" in erro:
+                return None, "NAO_ENCONTRADA"
+                
+            logger.error("[LedgerClient] Erro de rede ao consultar saldo | emp=%s: %s", empresa_id, e)
             self._conectado = False
-            return None
+            return None, "ERRO_REDE"
 
     def transferir(self, origem_id: str, destino_id: str, valor: int) -> Tuple[bool, str]:
         if not self._reconectar_se_necessario(): return False, "LEDGER_OFFLINE"
@@ -147,12 +160,6 @@ class LedgerClient:
     # ── Pagamento ANTES do despacho + Laudo imutável DEPOIS da missão ──────────
 
     def autorizar_pagamento(self, id_requisicao: str, empresa_id: str, custo: int) -> Tuple[bool, str]:
-        """
-        Chamada pela Base ANTES de despachar o drone. Debita a carteira da
-        empresa no ledger. O drone só deve ser despachado se isto retornar
-        sucesso=True. É idempotente: uma requisição reemitida (drone perdido)
-        não é cobrada duas vezes — o chaincode detecta pela chave "PAG_"+id.
-        """
         if not self._reconectar_se_necessario():
             return False, "LEDGER_OFFLINE"
         try:
@@ -177,11 +184,6 @@ class LedgerClient:
         self, id_requisicao: str, drone_id: str, base_id: str, setor_id: str,
         tipo_ocorrencia: str, criticidade: str
     ) -> Tuple[bool, str]:
-        """
-        Chamada quando a missão termina. Apenas grava o laudo imutável da
-        missão — não debita nada (o pagamento já foi feito em
-        autorizar_pagamento(), antes do despacho do drone).
-        """
         if not self._reconectar_se_necessario():
             return False, "LEDGER_OFFLINE"
         try:

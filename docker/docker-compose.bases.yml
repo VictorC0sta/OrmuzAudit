@@ -25,12 +25,11 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       IP_PC_DRONES: "${IP_PC_DRONES}"
-      # Identidade Criptográfica Exclusiva da Base Norte
       FABRIC_ORG_DOMAIN: "norte.ormuz.com"
       FABRIC_USER: "Admin"
-      FABRIC_PEERS: "peer0.norte.ormuz.com"
+      # NOVA LISTA DE PEERS PARA ENDOSSO (Norte pede a todos)
+      FABRIC_PEERS: "peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.leste.ormuz.com,peer0.oeste.ormuz.com"
     volumes:
-      # Injeta os certificados de segurança dentro do container!
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
@@ -51,11 +50,10 @@ services:
       MINHA_PORTA_UDP: "${PORTA_BASE_SUL_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
       IP_BASE_NORTE: "base_norte"
-      # ... demais endereços ...
-      # Identidade Criptográfica Exclusiva da Base Sul
       FABRIC_ORG_DOMAIN: "sul.ormuz.com"
       FABRIC_USER: "Admin"
-      FABRIC_PEERS: "peer0.sul.ormuz.com"
+      # NOVA LISTA DE PEERS PARA ENDOSSO (Sul pede a todos)
+      FABRIC_PEERS: "peer0.sul.ormuz.com,peer0.norte.ormuz.com,peer0.leste.ormuz.com,peer0.oeste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
@@ -77,11 +75,10 @@ services:
       MINHA_PORTA_UDP: "${PORTA_BASE_LESTE_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
       IP_BASE_NORTE: "base_norte"
-      # ... demais endereços ...
-      # Identidade Criptográfica Exclusiva da Base Leste
       FABRIC_ORG_DOMAIN: "leste.ormuz.com"
       FABRIC_USER: "Admin"
-      FABRIC_PEERS: "peer0.leste.ormuz.com"
+      # NOVA LISTA DE PEERS PARA ENDOSSO (Leste pede a todos)
+      FABRIC_PEERS: "peer0.leste.ormuz.com,peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.oeste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
@@ -103,11 +100,10 @@ services:
       MINHA_PORTA_UDP: "${PORTA_BASE_OESTE_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
       IP_BASE_NORTE: "base_norte"
-      # ... demais endereços ...
-      # Identidade Criptográfica Exclusiva da Base Oeste
       FABRIC_ORG_DOMAIN: "oeste.ormuz.com"
       FABRIC_USER: "Admin"
-      FABRIC_PEERS: "peer0.oeste.ormuz.com"
+      # NOVA LISTA DE PEERS PARA ENDOSSO (Oeste pede a todos)
+      FABRIC_PEERS: "peer0.oeste.ormuz.com,peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.leste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
@@ -117,6 +113,5 @@ services:
 networks:
   ormuz_net:
     driver: bridge
-  # Declara que a rede do Hyperledger existe fora deste compose e nós queremos nos conectar nela!
   ormuz_fabric:
     external: true
