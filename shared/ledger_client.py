@@ -7,6 +7,14 @@ Papel na arquitetura:
     chamam apenas as funções públicas deste módulo, sem saber nada sobre peers,
     channels ou endorsement policies.
 
+Fluxo de pagamento (ATUALIZADO):
+    1. autorizar_pagamento() — chamada pela Base ANTES de despachar o drone.
+       Debita a carteira da empresa no ledger. Só se isso retornar sucesso=True
+       é que o drone pode ser despachado. Idempotente: requisições reemitidas
+       (drone perdido) não são cobradas duas vezes.
+    2. registrar_laudo() — chamada quando a missão termina. Apenas grava o
+       laudo imutável; não move mais nenhum token (o pagamento já ocorreu).
+
 Instalação:
     pip install fabric-sdk-py
 """
@@ -42,7 +50,8 @@ class LedgerClient:
     """
 
     CC_FN_SALDO = "ConsultarSaldo"
-    CC_FN_REGISTRAR_CONCLUSAO = "RegistrarConclusao"
+    CC_FN_AUTORIZAR_PAGAMENTO = "AutorizarPagamento"
+    CC_FN_REGISTRAR_LAUDO = "RegistrarLaudo"
     CC_FN_AUDITORIA = "AuditoriaEmpresa"
     CC_FN_CRIAR_CARTEIRA = "CriarCarteira"
     CC_FN_TRANSFERIR = "TransferirTokens"
@@ -135,46 +144,68 @@ class LedgerClient:
             self._conectado = False
             return False, "ERRO_REDE"
 
-    # ── Log de Missão e Cobrança Atômica ──────────────────────────────────────
+    # ── Pagamento ANTES do despacho + Laudo imutável DEPOIS da missão ──────────
 
-    def registrar_conclusao(
+    def autorizar_pagamento(self, id_requisicao: str, empresa_id: str, custo: int) -> Tuple[bool, str]:
+        """
+        Chamada pela Base ANTES de despachar o drone. Debita a carteira da
+        empresa no ledger. O drone só deve ser despachado se isto retornar
+        sucesso=True. É idempotente: uma requisição reemitida (drone perdido)
+        não é cobrada duas vezes — o chaincode detecta pela chave "PAG_"+id.
+        """
+        if not self._reconectar_se_necessario():
+            return False, "LEDGER_OFFLINE"
+        try:
+            resultado = self._invoke(self.CC_FN_AUTORIZAR_PAGAMENTO, [id_requisicao, empresa_id, str(custo)]) or {}
+            sucesso = resultado.get("sucesso", False)
+            motivo = resultado.get("motivo", "OK" if sucesso else "desconhecido")
+
+            if sucesso:
+                logger.info("[LedgerClient] Pagamento autorizado | req=%s emp=%s custo=%d saldo_restante=%s",
+                            id_requisicao[:8], empresa_id, custo, resultado.get("saldo_restante", "?"))
+            else:
+                logger.warning("[LedgerClient] Pagamento NEGADO | req=%s emp=%s custo=%d motivo=%s",
+                               id_requisicao[:8], empresa_id, custo, motivo)
+
+            return sucesso, motivo
+        except Exception as e:
+            logger.error("[LedgerClient] Erro ao autorizar pagamento | req=%s: %s", id_requisicao[:8], e)
+            self._conectado = False
+            return False, "ERRO_REDE"
+
+    def registrar_laudo(
         self, id_requisicao: str, drone_id: str, base_id: str, setor_id: str,
-        tipo_ocorrencia: str, criticidade: str, empresa_id: str, custo: int
+        tipo_ocorrencia: str, criticidade: str
     ) -> Tuple[bool, str]:
         """
-        Registra o laudo e executa a cobrança da empresa em uma única transação atômica.
+        Chamada quando a missão termina. Apenas grava o laudo imutável da
+        missão — não debita nada (o pagamento já foi feito em
+        autorizar_pagamento(), antes do despacho do drone).
         """
         if not self._reconectar_se_necessario():
             return False, "LEDGER_OFFLINE"
         try:
             timestamp = str(int(time.time()))
-            
-            # ATUALIZADO: A assinatura no Go agora espera idEmpresa e custoStr no final
-            args = [
-                id_requisicao, drone_id, base_id, setor_id, timestamp, 
-                tipo_ocorrencia, str(criticidade), empresa_id, str(custo)
-            ]
-            
-            resultado = self._invoke(self.CC_FN_REGISTRAR_CONCLUSAO, args) or {}
+            args = [id_requisicao, drone_id, base_id, setor_id, timestamp, tipo_ocorrencia, str(criticidade)]
+
+            resultado = self._invoke(self.CC_FN_REGISTRAR_LAUDO, args) or {}
             sucesso = resultado.get("sucesso", False)
             motivo = resultado.get("motivo", "OK" if sucesso else "desconhecido")
 
             if sucesso:
-                logger.info("[LedgerClient] Missão e Cobrança Registradas | req=%s drone=%s emp=%s custo=%d saldo_restante=%s",
-                            id_requisicao[:8], drone_id, empresa_id, custo, resultado.get("saldo_restante", "?"))
+                logger.info("[LedgerClient] Laudo registrado | req=%s drone=%s", id_requisicao[:8], drone_id)
             else:
-                logger.warning("[LedgerClient] Falha ao concluir missão | req=%s motivo=%s", id_requisicao[:8], motivo)
+                logger.warning("[LedgerClient] Falha ao registrar laudo | req=%s motivo=%s", id_requisicao[:8], motivo)
 
             return sucesso, motivo
         except Exception as e:
-            logger.error("[LedgerClient] Erro ao registrar conclusão | req=%s: %s", id_requisicao[:8], e)
+            logger.error("[LedgerClient] Erro ao registrar laudo | req=%s: %s", id_requisicao[:8], e)
             self._conectado = False
             return False, "ERRO_REDE"
 
     def auditoria_empresa(self, empresa_id: str) -> List[Dict[str, Any]]:
         if not self._reconectar_se_necessario(): return []
         try:
-            # REMOVIDO o pdc_name, pois o chaincode em Go não o exige mais.
             resultado = self._query(self.CC_FN_AUDITORIA, [empresa_id]) or {}
             return resultado.get("transacoes", [])
         except Exception as e:

@@ -45,9 +45,13 @@ class EstadoDrone(str, Enum):
 
 
 class StatusRequisicao(str, Enum):
-    PENDENTE = "pendente"
-    ACEITA   = "aceita"
+    PENDENTE  = "pendente"
+    ACEITA    = "aceita"
     CONCLUIDA = "concluida"
+    # NOVO: requisição que chegou a vencer a janela de prioridade local mas
+    # foi recusada pelo ledger por falta de saldo da empresa (AutorizarPagamento
+    # retornou sucesso=False). Estado terminal — não volta a ser tentada.
+    REJEITADA = "rejeitada"
 
 
 class TipoMensagem(str, Enum):

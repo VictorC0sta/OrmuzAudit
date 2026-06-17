@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hyperledger/fabric-chaincode-go/pkg/cid"
 	"github.com/hyperledger/fabric-contract-api-go/contractapi"
 )
 
@@ -22,6 +21,17 @@ type Carteira struct {
 	IDEmpresa string `json:"id_empresa"`
 	Saldo     int    `json:"saldo"`
 	MSPID     string `json:"msp_id"` // Armazena a identidade do dono para autenticação
+}
+
+// AutorizacaoPagamento é o registro imutável de que o débito de uma missão
+// já foi feito ANTES do drone ser despachado. A chave no ledger é "PAG_"+IDRequisicao,
+// o que torna a autorização idempotente: se a mesma requisição passar por aqui de
+// novo (ex.: re-despacho após perda de drone), não cobramos duas vezes.
+type AutorizacaoPagamento struct {
+	IDRequisicao string `json:"id_requisicao"`
+	IDEmpresa    string `json:"id_empresa"`
+	Custo        int    `json:"custo"`
+	Status       string `json:"status"` // AUTORIZADO
 }
 
 // LaudoMissao guarda o registro imutável do que o drone fez
@@ -146,19 +156,37 @@ func (s *SmartContract) TransferirTokens(ctx contractapi.TransactionContextInter
 	return &RespostaTransacao{Sucesso: true, Motivo: "Transferencia concluida com sucesso", SaldoRestante: carteiraOrigem.Saldo}, nil
 }
 
-// ── 2. LOG DE OPERAÇÕES IMUTÁVEL E COBRANÇA ATÔMICA PÓS-MISSÃO ──────────────
+// ── 2. PAGAMENTO ANTES DO DESPACHO + LAUDO IMUTÁVEL DEPOIS DA MISSÃO ────────
+//
+// Antes: o débito acontecia só em RegistrarConclusao, ou seja, DEPOIS do drone
+// já ter feito a missão inteira. Isso violava a regra "drone só é despachado
+// após confirmação do pagamento" e abria brecha para múltiplas requisições da
+// mesma empresa serem aceitas e despachadas mesmo sem saldo suficiente para
+// todas (só a 1ª conclusão conseguia debitar; as demais "trabalhavam de
+// graça"). Agora dividimos em duas transações atômicas:
+//
+//   1) AutorizarPagamento — chamada pela Base ANTES de despachar o drone.
+//      Debita a carteira e grava um recibo imutável em "PAG_"+idRequisicao.
+//      É idempotente: se a mesma requisição passar aqui de novo (ex.: drone
+//      caiu e a missão foi reemitida para outra base), não cobra de novo.
+//
+//   2) RegistrarLaudo — chamada quando a missão termina. Só grava o laudo se
+//      já existir uma autorização de pagamento para aquela requisição —
+//      nunca debita nada.
 
-// RegistrarConclusao liquida o pagamento e cria o Laudo de forma indissociável
-func (s *SmartContract) RegistrarConclusao(ctx contractapi.TransactionContextInterface, idReq string, droneID string, baseID string, setorID string, timestamp string, tipoOcorrencia string, criticidade string, idEmpresa string, custoStr string) (*RespostaTransacao, error) {
-	
-	// 1. Prevenção de Duplo Gasto Dinâmica (Idempotência)
-	// Como a chave do estado é o ID da requisição, se o laudo já existir, a transação cai aqui.
-	laudoExistente, err := ctx.GetStub().GetState(idReq)
+// AutorizarPagamento debita o custo da missão da carteira da empresa ANTES
+// do drone ser despachado. Retorna sucesso=false se não houver saldo.
+func (s *SmartContract) AutorizarPagamento(ctx contractapi.TransactionContextInterface, idRequisicao string, idEmpresa string, custoStr string) (*RespostaTransacao, error) {
+	chavePagamento := "PAG_" + idRequisicao
+
+	pagamentoExistente, err := ctx.GetStub().GetState(chavePagamento)
 	if err != nil {
 		return nil, fmt.Errorf("falha ao verificar o ledger: %v", err)
 	}
-	if laudoExistente != nil {
-		return &RespostaTransacao{Sucesso: false, Motivo: "erro: esta missao ja foi finalizada e paga anteriormente"}, nil
+	if pagamentoExistente != nil {
+		// Idempotência: já autorizado antes (ex.: redespacho após drone perdido).
+		// Não cobra de novo — apenas confirma que o pagamento já está garantido.
+		return &RespostaTransacao{Sucesso: true, Motivo: "pagamento ja autorizado anteriormente (idempotente)"}, nil
 	}
 
 	custo, err := strconv.Atoi(custoStr)
@@ -166,28 +194,64 @@ func (s *SmartContract) RegistrarConclusao(ctx contractapi.TransactionContextInt
 		return nil, fmt.Errorf("custo operacional invalido: %v", err)
 	}
 
-	// 2. Processamento do Débito Financeiro
 	carteiraJSON, err := ctx.GetStub().GetState(idEmpresa)
 	if err != nil || carteiraJSON == nil {
-		return &RespostaTransacao{Sucesso: false, Motivo: "carteira da empresa nao encontrada para faturamento"}, nil
+		return &RespostaTransacao{Sucesso: false, Motivo: "carteira da empresa nao encontrada para autorizacao"}, nil
 	}
 
 	var carteira Carteira
 	json.Unmarshal(carteiraJSON, &carteira)
 
 	if carteira.Saldo < custo {
-		return &RespostaTransacao{Sucesso: false, Motivo: "falha critica: saldo insuficiente para liquidação da divida"}, nil
+		return &RespostaTransacao{Sucesso: false, Motivo: "saldo insuficiente para autorizar a missao"}, nil
 	}
 
-	// Deduz os tokens apenas após a confirmação de que o serviço foi prestado
+	// Débito imediato. Se duas requisições concorrentes da mesma empresa
+	// chegarem aqui ao mesmo tempo, o controle de versão do Fabric (MVCC)
+	// garante que apenas uma das transações que escrevem na mesma chave
+	// "idEmpresa" será validada no bloco — a outra é invalidada pelo próprio
+	// consenso, e não apenas pela lógica do chaincode.
 	carteira.Saldo -= custo
 	carteiraAtualizadaJSON, _ := json.Marshal(carteira)
-	err = ctx.GetStub().PutState(idEmpresa, carteiraAtualizadaJSON)
-	if err != nil {
-		return nil, fmt.Errorf("falha ao atualizar fundos da empresa: %v", err)
+	if err := ctx.GetStub().PutState(idEmpresa, carteiraAtualizadaJSON); err != nil {
+		return nil, fmt.Errorf("falha ao debitar carteira: %v", err)
 	}
 
-	// 3. Gravação do Laudo Técnico com os Resultados Reais
+	autorizacao := AutorizacaoPagamento{
+		IDRequisicao: idRequisicao,
+		IDEmpresa:    idEmpresa,
+		Custo:        custo,
+		Status:       "AUTORIZADO",
+	}
+	autorizacaoJSON, _ := json.Marshal(autorizacao)
+	if err := ctx.GetStub().PutState(chavePagamento, autorizacaoJSON); err != nil {
+		return nil, fmt.Errorf("falha ao registrar autorizacao de pagamento: %v", err)
+	}
+
+	return &RespostaTransacao{Sucesso: true, Motivo: "OK", SaldoRestante: carteira.Saldo}, nil
+}
+
+// RegistrarLaudo grava o resultado da missão de forma imutável. Não move
+// nenhum token — o pagamento já foi feito em AutorizarPagamento, antes do
+// despacho. Recusa registrar laudo de missão sem pagamento autorizado.
+func (s *SmartContract) RegistrarLaudo(ctx contractapi.TransactionContextInterface, idReq string, droneID string, baseID string, setorID string, timestamp string, tipoOcorrencia string, criticidade string) (*RespostaTransacao, error) {
+	laudoExistente, err := ctx.GetStub().GetState(idReq)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao verificar o ledger: %v", err)
+	}
+	if laudoExistente != nil {
+		return &RespostaTransacao{Sucesso: false, Motivo: "laudo ja registrado para esta missao"}, nil
+	}
+
+	chavePagamento := "PAG_" + idReq
+	pagamentoJSON, err := ctx.GetStub().GetState(chavePagamento)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao verificar pagamento: %v", err)
+	}
+	if pagamentoJSON == nil {
+		return &RespostaTransacao{Sucesso: false, Motivo: "nenhum pagamento autorizado para esta requisicao — laudo rejeitado"}, nil
+	}
+
 	laudo := LaudoMissao{
 		IDRequisicao:   idReq,
 		DroneID:        droneID,
@@ -199,12 +263,11 @@ func (s *SmartContract) RegistrarConclusao(ctx contractapi.TransactionContextInt
 	}
 
 	laudoJSON, _ := json.Marshal(laudo)
-	err = ctx.GetStub().PutState(idReq, laudoJSON)
-	if err != nil {
+	if err := ctx.GetStub().PutState(idReq, laudoJSON); err != nil {
 		return nil, fmt.Errorf("falha ao salvar o laudo imutavel: %v", err)
 	}
 
-	return &RespostaTransacao{Sucesso: true, Motivo: "OK", SaldoRestante: carteira.Saldo}, nil
+	return &RespostaTransacao{Sucesso: true, Motivo: "OK"}, nil
 }
 
 // ── 3. TRANSPARÊNCIA E AUDITABILIDADE ──────────────────────────────────────

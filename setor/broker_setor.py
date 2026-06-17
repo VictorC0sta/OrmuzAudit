@@ -155,7 +155,16 @@ def processar_alerta(msg: dict):
         SETOR_ID, requisicao.id_requisicao[:8], requisicao.tipo_ocorrencia, requisicao.criticidade, ts,
     )
 
-    # NOVO FLUXO: Consulta de viabilidade financeira (sem debitar)
+    # ATENÇÃO: esta é só uma pré-filtragem OTIMISTA (sem lock, sem reserva de
+    # saldo) — existe apenas para não fazer broadcast de requisições de
+    # empresas obviamente sem fundos. NÃO é o ponto que garante ausência de
+    # duplo gasto: como esta leitura não bloqueia o saldo, duas requisições
+    # concorrentes da mesma empresa ainda podem passar por aqui ao mesmo
+    # tempo. A autorização que de fato vale (débito atômico no ledger) só
+    # acontece na Base, em AutorizarPagamento(), IMEDIATAMENTE ANTES do
+    # despacho do drone — ver base/broker.py:_tentar_aceitar(). É lá que o
+    # Fabric garante exclusão mútua real via controle de versão (MVCC) na
+    # carteira, e é só depois dessa confirmação que o drone é despachado.
     saldo_atual = ledger_client.consultar_saldo(empresa_id)
     
     if saldo_atual is None:
@@ -177,7 +186,8 @@ def processar_alerta(msg: dict):
         })
         return
 
-    logger.info("[%s] Operação autorizada. Saldo atual: %d tokens. Iniciando o despacho...", SETOR_ID, saldo_atual)
+    logger.info("[%s] Pré-filtragem OK. Saldo atual: %d tokens. Encaminhando para as bases — a confirmação "
+                "definitiva do pagamento ocorre na base, antes do despacho do drone.", SETOR_ID, saldo_atual)
     
     broadcast_com_retry(payload)
 

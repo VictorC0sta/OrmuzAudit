@@ -64,9 +64,40 @@ def _tentar_aceitar(id_requisicao: str) -> None:
     if estado.status_requisicao(id_requisicao) != StatusRequisicao.PENDENTE.value: return
     drone = estado.drone_livre()
     if drone is None: return
+
+    entrada = estado.obter_entrada(id_requisicao)
+    if not entrada: return
+    empresa_id = getattr(entrada, "empresa_id", "DESCONHECIDA")
+    custo = calcular_custo(str(entrada.criticidade))
+
+    # Exclusão mútua local: reserva a requisição para esta base antes de
+    # gastar tempo de rede com o ledger (mesma garantia de antes, via Lock).
     if not estado.marcar_aceita(id_requisicao): return
+
+    # ── PAGAMENTO ANTES DO DESPACHO ──────────────────────────────────────
+    # O drone só é ocupado/despachado se o ledger confirmar o débito agora.
+    # Isso fecha a brecha em que o serviço era prestado e o pagamento só
+    # era checado/feito na conclusão da missão (tarde demais para evitar
+    # que uma empresa sem saldo já tivesse consumido um drone).
+    pago, motivo = ledger_client.autorizar_pagamento(id_requisicao, empresa_id, custo)
+    if not pago:
+        logger.warning(
+            "[%s] Pagamento NEGADO para req %s (empresa %s, custo %d): %s — missao cancelada, drone NAO despachado",
+            BASE_ID, id_requisicao[:8], empresa_id, custo, motivo,
+        )
+        with estado.fila_lock:
+            entrada.status = StatusRequisicao.REJEITADA.value
+        notificar_monitor({
+            "tipo": "PAGAMENTO_RECUSADO", "base": BASE_ID, "empresa": empresa_id,
+            "id_requisicao": id_requisicao, "motivo": motivo,
+        })
+        return
+
     estado.ocupar_drone(drone.drone_id, id_requisicao)
-    logger.info("[%s] Aceitando req %s -> drone %s", BASE_ID, id_requisicao[:8], drone.drone_id)
+    logger.info(
+        "[%s] Pagamento confirmado no ledger (%d tokens, empresa %s) -> aceitando req %s com drone %s",
+        BASE_ID, custo, empresa_id, id_requisicao[:8], drone.drone_id,
+    )
 
     aceite = {
         "tipo": TipoMensagem.ACEITE.value, "id_requisicao": id_requisicao,
@@ -97,18 +128,12 @@ def _processar_requisicao(msg: dict) -> None:
     if not estado.verificar_e_registrar_vista(id_req): return
     clock.atualizar(ts)
 
-    # OBS: Você deve adicionar o campo empresa_id na classe EntradaFila (em fila_replicada.py)
     entrada = EntradaFila(
         id_requisicao=id_req, id_setor=id_setor, timestamp_logico=ts,
         criticidade=msg.get("criticidade", Criticidade.BAIXA.value),
         tipo_ocorrencia=msg.get("tipo_ocorrencia", ""),
     )
-    
-    # Se o EntradaFila não aceitar kwargs, use: setattr(entrada, "empresa_id", empresa_id)
-    if hasattr(entrada, 'empresa_id'):
-        entrada.empresa_id = empresa_id
-    else:
-        setattr(entrada, "empresa_id", empresa_id)
+    setattr(entrada, "empresa_id", empresa_id)
 
     estado.inserir_na_fila(entrada)
     timeout_s = prioridade.timeout_para_setor(id_setor)
@@ -139,25 +164,28 @@ def _processar_heartbeat_tcp(msg: dict) -> None:
     if missao_concluida:
         estado.marcar_concluida(missao_concluida)
         entrada = estado.obter_entrada(missao_concluida)
-        
+
         if entrada:
             empresa_id = getattr(entrada, 'empresa_id', "DESCONHECIDA")
-            custo_calculado = calcular_custo(str(entrada.criticidade))
-            
-            logger.info("[%s] Missão %s do drone %s concluída. Faturando %d tokens da empresa %s.", 
-                        BASE_ID, missao_concluida[:8], drone_id, custo_calculado, empresa_id)
-            
-            # ATUALIZADO: Agora envia empresa e custo para liquidar na blockchain
-            ledger_client.registrar_conclusao(
+
+            # O pagamento JÁ foi feito em autorizar_pagamento(), antes do
+            # despacho. Aqui só registramos o laudo imutável da missão —
+            # nenhum token é movido nesta etapa.
+            sucesso, motivo = ledger_client.registrar_laudo(
                 id_requisicao=missao_concluida,
                 drone_id=drone_id,
                 base_id=BASE_ID,
                 setor_id=entrada.id_setor,
                 tipo_ocorrencia=entrada.tipo_ocorrencia,
                 criticidade=str(entrada.criticidade),
-                empresa_id=empresa_id,
-                custo=custo_calculado
             )
+
+            if sucesso:
+                logger.info("[%s] Laudo da missao %s (drone %s, empresa %s) registrado no ledger.",
+                            BASE_ID, missao_concluida[:8], drone_id, empresa_id)
+            else:
+                logger.warning("[%s] Falha ao registrar laudo da missao %s: %s",
+                               BASE_ID, missao_concluida[:8], motivo)
 
         threading.Thread(target=_processar_fila_pendente, daemon=True).start()
         notificar_monitor({"tipo": "MISSAO_CONCLUIDA", "base": BASE_ID, "drone": drone_id, "setor_concluido": missao_concluida})
@@ -177,6 +205,9 @@ def _processar_reemissao(msg: dict) -> None:
         setattr(nova, "empresa_id", msg.get("empresa_id", "DESCONHECIDA"))
         estado.inserir_na_fila(nova)
 
+    # OBS: se esta requisição já tinha pagamento autorizado (caso comum de
+    # reemissão por drone perdido), autorizar_pagamento() na nova tentativa
+    # de _tentar_aceitar() é idempotente no chaincode e NÃO cobra de novo.
     timeout_s = prioridade.timeout_para_setor(id_setor)
     timer = threading.Timer(timeout_s, _tentar_aceitar, args=(id_req,))
     with _timers_lock: _timers[id_req] = timer
@@ -199,6 +230,9 @@ def _tratar_drone_perdido(drone_id: str) -> None:
     if not id_req_em_curso: return
     entrada = estado.obter_entrada(id_req_em_curso)
     if entrada:
+        # O pagamento desta requisição já foi feito no ledger (autorizar_pagamento
+        # ocorreu antes do despacho). A reemissão abaixo NÃO vai cobrar de novo —
+        # ela só busca um novo drone para terminar uma missão já paga.
         with estado.fila_lock: entrada.status = StatusRequisicao.PENDENTE.value
         reemissao = {
             "tipo": TipoMensagem.REEMISSAO.value, "id_requisicao": entrada.id_requisicao,
@@ -226,7 +260,6 @@ def _loop_udp() -> None:
     while True:
         try:
             dados, _ = servidor.recvfrom(BUFFER_UDP)
-            import json
             try: msg = json.loads(dados.decode("utf-8"))
             except Exception: continue
             drone_id, estado_drone, porta = msg.get("drone_id", ""), msg.get("estado", EstadoDrone.LIVRE.value), int(msg.get("porta", 7001))
