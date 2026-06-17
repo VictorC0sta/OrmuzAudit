@@ -76,6 +76,7 @@ with open(_CAMINHO_CUSTO, "r", encoding="utf-8") as _f:
 
 def calcular_custo(criticidade: str) -> int:
     return _CUSTO_POR_CRIT.get(criticidade, {}).get("tokens", 1)
+
 # ── Instâncias Globais ────────────────────────────────────────────────────────
 
 # O Relógio de Lamport carimba cada nova requisição com um número sequencial,
@@ -88,49 +89,38 @@ clock = LamportClock()
 def broadcast_com_retry(payload: dict) -> dict[str, bool]:
     """
     Envia a requisição para todas as bases garantindo entrega sob falhas leves.
-
-    Como funciona:
-    1. Tenta enviar para todas as 4 bases de uma vez.
-    2. Se alguma falhar (ex: base reiniciando), filtra apenas as que falharam.
-    3. Aguarda um delay e tenta reenviar SOMENTE para as que falharam.
-    4. O sistema continua operando mesmo se uma base ficar offline definitivamente.
     """
     resultados_finais: dict[str, bool] = {}
     pendentes = list(BASES)
 
     for tentativa in range(1, BROADCAST_MAX_TENTATIVAS + 1):
         if not pendentes:
-            break  # Todas as bases receberam com sucesso
+            break 
 
-        # Envia em paralelo para a lista de pendentes
         parcial = tcp_broadcast(pendentes, payload)
         resultados_finais.update(parcial)
 
-        # Filtra as bases que retornaram False (falha de conexão)
+        # As bases que não responderam nesta rodada são consideradas falhas temporárias.
         falhas = [(h, p) for (h, p) in pendentes if not parcial.get(f"{h}:{p}", False)]
-
         enviados = len(pendentes) - len(falhas)
+        
         logger.info(
             "[%s] Broadcast tentativa %d/%d — %d/%d bases alcançadas%s",
-            SETOR_ID, tentativa, BROADCAST_MAX_TENTATIVAS,
-            enviados, len(pendentes),
+            SETOR_ID, tentativa, BROADCAST_MAX_TENTATIVAS, enviados, len(pendentes),
             f" | {len(falhas)} offline, aguardando {BROADCAST_RETRY_DELAY_S}s para retry" if falhas else "",
         )
 
         if not falhas:
             break
 
-        # Prepara a próxima iteração apenas com as bases que falharam
         pendentes = falhas
         if tentativa < BROADCAST_MAX_TENTATIVAS:
             time.sleep(BROADCAST_RETRY_DELAY_S)
 
-    # Log de aviso caso esgotem as tentativas e alguma base continue offline
     if pendentes:
         logger.warning(
             "[%s] Bases não alcançadas após %d tentativas: %s",
-            SETOR_ID, BROADCAST_MAX_TENTATIVAS,
-            [f"{h}:{p}" for h, p in pendentes],
+            SETOR_ID, BROADCAST_MAX_TENTATIVAS, [f"{h}:{p}" for h, p in pendentes],
         )
 
     return resultados_finais
@@ -146,6 +136,8 @@ def processar_alerta(msg: dict):
         return
 
     ts = clock.incrementar()
+    empresa_id = msg.get("empresa_id")
+    custo = calcular_custo(msg.get("criticidade"))
 
     requisicao = MensagemRequisicao(
         id_setor=SETOR_ID,
@@ -155,26 +147,23 @@ def processar_alerta(msg: dict):
     )
 
     payload = asdict(requisicao)
+    # INJEÇÃO CRUCIAL: Passando o dono da carteira para frente para a cobrança futura
+    payload["empresa_id"] = empresa_id 
 
     logger.info(
         "[%s] Alerta recebido → req %s | %s [%s] | Lamport=%d",
-        SETOR_ID,
-        requisicao.id_requisicao[:8],
-        requisicao.tipo_ocorrencia,
-        requisicao.criticidade,
-        ts,
+        SETOR_ID, requisicao.id_requisicao[:8], requisicao.tipo_ocorrencia, requisicao.criticidade, ts,
     )
 
-    # CORRIGIDO: ledger_client.debitar() retorna uma TUPLA (sucesso, motivo).
-    # A versão anterior fazia "ok = ledger_client.debitar(...)" e depois
-    # "if not ok:" — como uma tupla de 2 elementos é sempre truthy em Python
-    # (mesmo contendo False), essa checagem nunca disparava, e a requisição
-    # era sempre encaminhada às bases mesmo com saldo insuficiente ou ledger
-    # offline. Agora desempacotamos os dois valores corretamente.
-    empresa_id = msg.get("empresa_id")
-    custo = calcular_custo(msg.get("criticidade"))
-    sucesso, motivo = ledger_client.debitar(empresa_id, custo, requisicao.id_requisicao)
-    if not sucesso:
+    # NOVO FLUXO: Consulta de viabilidade financeira (sem debitar)
+    saldo_atual = ledger_client.consultar_saldo(empresa_id)
+    
+    if saldo_atual is None:
+        logger.warning("[%s] Rejeitado: Falha ao consultar o ledger ou empresa %s não existe.", SETOR_ID, empresa_id)
+        return
+        
+    if saldo_atual < custo:
+        motivo = f"Saldo insuficiente (Requer: {custo}, Atual: {saldo_atual})"
         logger.warning(
             "[%s] Requisição %s REJEITADA para empresa %s — motivo: %s",
             SETOR_ID, requisicao.id_requisicao[:8], empresa_id, motivo,
@@ -188,6 +177,8 @@ def processar_alerta(msg: dict):
         })
         return
 
+    logger.info("[%s] Operação autorizada. Saldo atual: %d tokens. Iniciando o despacho...", SETOR_ID, saldo_atual)
+    
     broadcast_com_retry(payload)
 
     notificar_monitor({
@@ -202,11 +193,6 @@ def processar_alerta(msg: dict):
 # ── Servidor TCP (Recepção dos Sensores) ──────────────────────────────────────
 
 def loop_servidor():
-    """
-    Inicia o servidor para escutar os alertas do Sensor local.
-    Usa um ThreadPoolExecutor para que, se dois sensores tentarem enviar dados 
-    exatamente no mesmo milissegundo, nenhum fique bloqueado esperando o outro.
-    """
     servidor = criar_servidor_tcp(MINHA_PORTA)
     logger.info(
         "[%s — %s] Broker iniciado na porta %d | prioridade: %s",
@@ -216,16 +202,13 @@ def loop_servidor():
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="alerta") as pool:
         while True:
             try:
-                # Fica travado aguardando uma conexão do sensor
                 conn, addr = servidor.accept()
-                # Delega o processamento da mensagem para uma thread livre no pool
                 pool.submit(_tratar_conexao, conn, addr)
             except Exception as e:
                 logger.error("[%s] Erro no accept: %s", SETOR_ID, e, exc_info=True)
 
 
 def _tratar_conexao(conn, addr):
-    """Lê a mensagem enviada pelo sensor, converte de JSON e processa."""
     try:
         msg = tcp_receber_completo(conn)
         conn.close()
@@ -237,24 +220,16 @@ def _tratar_conexao(conn, addr):
     except Exception as e:
         logger.error("[%s] Erro ao tratar conexão de %s: %s", SETOR_ID, addr, e, exc_info=True)
 
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    """Ponto de entrada do executável."""
     logger.info(
         "[%s] Inicializando broker | Bases: Norte=%s:%d Sul=%s:%d Leste=%s:%d Oeste=%s:%d | retry=%dx @ %.1fs",
-        SETOR_ID,
-        IP_BASE_NORTE, PORTA_BASE_NORTE,
-        IP_BASE_SUL,   PORTA_BASE_SUL,
-        IP_BASE_LESTE, PORTA_BASE_LESTE,
-        IP_BASE_OESTE, PORTA_BASE_OESTE,
-        BROADCAST_MAX_TENTATIVAS,
-        BROADCAST_RETRY_DELAY_S,
+        SETOR_ID, IP_BASE_NORTE, PORTA_BASE_NORTE, IP_BASE_SUL, PORTA_BASE_SUL,
+        IP_BASE_LESTE, PORTA_BASE_LESTE, IP_BASE_OESTE, PORTA_BASE_OESTE,
+        BROADCAST_MAX_TENTATIVAS, BROADCAST_RETRY_DELAY_S,
     )
-    # Trava a thread principal executando o servidor TCP
     loop_servidor()
-
 
 if __name__ == "__main__":
     main()
