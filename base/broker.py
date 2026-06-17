@@ -243,6 +243,8 @@ def _processar_heartbeat_tcp(msg: dict) -> None:
                 drone_id=drone_id,
                 base_id=BASE_ID,
                 setor_id=entrada.id_setor,
+                tipo_ocorrencia=entrada.tipo_ocorrencia,  # Extraído da entrada
+                criticidade=str(entrada.criticidade),     # Convertido para string por segurança
             )
 
         # Como o drone agora está livre, tenta puxar alguma ocorrência da fila de espera

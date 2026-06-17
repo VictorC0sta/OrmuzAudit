@@ -1,21 +1,16 @@
 """
 constantes.py — Enums e valores fixos compartilhados por todos os módulos.
-Importar daqui garante que sensor, broker_setor, broker_base e drone
-falem a mesma língua.
 """
 
 from enum import Enum
 
 
-# ── Criticidade das ocorrências ─────────────────────────────────────────────
-
 class Criticidade(str, Enum):
-    CRITICA = "CRITICA"   # Embarcação em perigo imediato, explosivo
-    ALTA    = "ALTA"      # Bloqueio de rota, objeto não identificado
-    BAIXA   = "BAIXA"    
+    CRITICA = "CRITICA"
+    ALTA    = "ALTA"
+    BAIXA   = "BAIXA"
 
     def peso(self) -> int:
-        """Retorna peso numérico para ordenação (maior = mais urgente)."""
         pesos = {
             Criticidade.CRITICA: 3,
             Criticidade.ALTA:    2,
@@ -23,8 +18,6 @@ class Criticidade(str, Enum):
         }
         return pesos[self]
 
-
-# ── Tipos de ocorrência ──────────────────────────────────────────────────────
 
 class TipoOcorrencia(str, Enum):
     EMBARCACAO_DERIVA        = "embarcacao_deriva"
@@ -34,9 +27,6 @@ class TipoOcorrencia(str, Enum):
     EMBARCACAO_PERIGO        = "embarcacao_perigo"
     ANOMALIA_MENOR           = "anomalia_menor"
 
-
-# ── Mapeamento tipo → criticidade padrão ────────────────────────────────────
-# Usado pelo sensor para montar a requisição com criticidade coerente.
 
 CRITICIDADE_POR_TIPO: dict[TipoOcorrencia, Criticidade] = {
     TipoOcorrencia.EMBARCACAO_PERIGO:       Criticidade.CRITICA,
@@ -48,15 +38,11 @@ CRITICIDADE_POR_TIPO: dict[TipoOcorrencia, Criticidade] = {
 }
 
 
-# ── Estado dos drones ────────────────────────────────────────────────────────
-
 class EstadoDrone(str, Enum):
     LIVRE    = "LIVRE"
     OCUPADO  = "OCUPADO"
     PERDIDO  = "PERDIDO"
 
-
-# ── Status de uma requisição na fila ────────────────────────────────────────
 
 class StatusRequisicao(str, Enum):
     PENDENTE = "pendente"
@@ -64,25 +50,16 @@ class StatusRequisicao(str, Enum):
     CONCLUIDA = "concluida"
 
 
-# ── Tipos de mensagem trocadas entre entidades ───────────────────────────────
-
 class TipoMensagem(str, Enum):
-    ALERTA       = "ALERTA"        # Sensor → Broker de setor
-    REQUISICAO   = "REQUISICAO"    # Broker de setor → Bases (broadcast)
-    ACEITE       = "ACEITE"        # Base → outras Bases (broadcast)
-    HEARTBEAT    = "HEARTBEAT"     # Drone → Base (UDP)
-    REGISTRO     = "REGISTRO"      # Drone → Base (ao iniciar)
-    REEMISSAO    = "REEMISSAO"     # Base → Bases (drone perdido)
+    ALERTA       = "ALERTA"
+    REQUISICAO   = "REQUISICAO"
+    ACEITE       = "ACEITE"
+    HEARTBEAT    = "HEARTBEAT"
+    REGISTRO     = "REGISTRO"
+    REEMISSAO    = "REEMISSAO"
 
 
-# ── Timeouts e intervalos (em ms / s) ───────────────────────────────────────
+TIMEOUT_PRIORIDADE_MS = {1: 0, 2: 200, 3: 400, 4: 600}
 
-TIMEOUT_PRIORIDADE_MS = {
-    1: 0,     # 1ª prioridade: tenta imediatamente
-    2: 200,
-    3: 400,
-    4: 600,
-}
-
-HEARTBEAT_INTERVALO_S  = 3   # Drone envia heartbeat a cada N segundos
-HEARTBEAT_MAX_FALHAS   = 3   # Após N falhas consecutivas → drone PERDIDO
+HEARTBEAT_INTERVALO_S  = 3
+HEARTBEAT_MAX_FALHAS   = 3

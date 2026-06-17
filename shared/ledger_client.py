@@ -214,19 +214,12 @@ class LedgerClient:
         drone_id: str,
         base_id: str,
         setor_id: str,
+        tipo_ocorrencia: str,  # NOVO PARÂMETRO
+        criticidade: str,      # NOVO PARÂMETRO
     ) -> Tuple[bool, str]:
         """
-        Registra no ledger que uma missão foi concluída com sucesso.
-
-        NOTA: o chaincode atual (RegistrarConclusao em token_contrato.go)
-        só persiste drone/base/setor/timestamp — não inclui o resultado da
-        missão (tipo de ocorrência, criticidade etc.). Isso é uma melhoria
-        separada no chaincode, fora do escopo desta correção de bugs de
-        demo; assim que o chaincode for estendido, basta acrescentar os
-        parâmetros aqui e na lista de args abaixo.
-
-        Retorna:
-            (Sucesso (bool), Motivo/Status (str))
+        Registra no ledger que uma missão foi concluída com sucesso,
+        incluindo o resultado tático da missão.
         """
         if not self._reconectar_se_necessario():
             logger.warning("[LedgerClient] Ledger offline — conclusão não registrada para req %s", id_requisicao[:8])
@@ -234,16 +227,19 @@ class LedgerClient:
 
         try:
             timestamp = str(int(time.time()))
+            
+            # Passando os novos parâmetros na ordem exata esperada pelo Go
             resultado = self._invoke(
                 self.CC_FN_REGISTRAR_CONCLUSAO,
-                [id_requisicao, drone_id, base_id, setor_id, timestamp],
+                [id_requisicao, drone_id, base_id, setor_id, timestamp, tipo_ocorrencia, str(criticidade)],
             ) or {}
+            
             sucesso = resultado.get("sucesso", False)
             motivo = resultado.get("motivo", "OK" if sucesso else "desconhecido")
 
             if sucesso:
-                logger.info("[LedgerClient] Conclusão registrada | req=%s drone=%s base=%s setor=%s",
-                            id_requisicao[:8], drone_id, base_id, setor_id)
+                logger.info("[LedgerClient] Conclusão registrada | req=%s drone=%s base=%s setor=%s tipo=%s criticidade=%s",
+                            id_requisicao[:8], drone_id, base_id, setor_id, tipo_ocorrencia, criticidade)
             else:
                 logger.warning("[LedgerClient] Falha ao registrar conclusão | req=%s motivo=%s",
                                id_requisicao[:8], motivo)
