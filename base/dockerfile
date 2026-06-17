@@ -2,21 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copia as pastas com os nomes corretos
+# Instala a dependência que faltava para o Python conseguir falar com o Fabric
+RUN pip install --no-cache-dir fabric-sdk-py
+
+ENV PYTHONPATH="/app/shared"
+
 COPY shared/ ./shared/
 COPY config/ ./config/
-
-# CORRIGIDO: copia o connection profile do Fabric — ledger_client.py
-# resolve esse caminho relativo a si mesmo (shared/../fabric/...) e,
-# sem essa cópia, o ledger nunca era encontrado (ficava sempre OFFLINE).
 COPY fabric/connection-profile.json ./fabric/connection-profile.json
-
 COPY base/ ./base/
 
-# Entra na pasta renomeada
 WORKDIR /app/base
 
 EXPOSE 6001 6101/udp
-
-# Executa o script com o novo nome
 CMD ["python", "broker.py"]

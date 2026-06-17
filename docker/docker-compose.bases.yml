@@ -4,7 +4,6 @@
 # =============================================================
 
 services:
-
   base_norte:
     build:
       context: ..
@@ -19,22 +18,23 @@ services:
       MINHA_PORTA: "${PORTA_BASE_NORTE}"
       MINHA_PORTA_UDP: "${PORTA_BASE_NORTE_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
-      # Endereços das outras bases para broadcast de ACEITE
       IP_BASE_SUL: "base_sul"
       IP_BASE_LESTE: "base_leste"
       IP_BASE_OESTE: "base_oeste"
       PORTA_BASE_SUL: "${PORTA_BASE_SUL}"
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
-      # Endereço dos drones (PC 3)
       IP_PC_DRONES: "${IP_PC_DRONES}"
-      # Parâmetros de timeout e heartbeat
-      TIMEOUT_BASE_2: "${TIMEOUT_BASE_2}"
-      TIMEOUT_BASE_3: "${TIMEOUT_BASE_3}"
-      TIMEOUT_BASE_4: "${TIMEOUT_BASE_4}"
-      HEARTBEAT_TIMEOUT: "${HEARTBEAT_TIMEOUT}"
+      # Identidade Criptográfica Exclusiva da Base Norte
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      # Injeta os certificados de segurança dentro do container!
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   base_sul:
     build:
@@ -51,18 +51,16 @@ services:
       MINHA_PORTA_UDP: "${PORTA_BASE_SUL_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
       IP_BASE_NORTE: "base_norte"
-      IP_BASE_LESTE: "base_leste"
-      IP_BASE_OESTE: "base_oeste"
-      PORTA_BASE_NORTE: "${PORTA_BASE_NORTE}"
-      PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
-      PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
-      IP_PC_DRONES: "${IP_PC_DRONES}"
-      TIMEOUT_BASE_2: "${TIMEOUT_BASE_2}"
-      TIMEOUT_BASE_3: "${TIMEOUT_BASE_3}"
-      TIMEOUT_BASE_4: "${TIMEOUT_BASE_4}"
-      HEARTBEAT_TIMEOUT: "${HEARTBEAT_TIMEOUT}"
+      # ... demais endereços ...
+      # Identidade Criptográfica Exclusiva da Base Sul
+      FABRIC_ORG_DOMAIN: "sul.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.sul.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   base_leste:
     build:
@@ -79,18 +77,16 @@ services:
       MINHA_PORTA_UDP: "${PORTA_BASE_LESTE_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
       IP_BASE_NORTE: "base_norte"
-      IP_BASE_SUL: "base_sul"
-      IP_BASE_OESTE: "base_oeste"
-      PORTA_BASE_NORTE: "${PORTA_BASE_NORTE}"
-      PORTA_BASE_SUL: "${PORTA_BASE_SUL}"
-      PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
-      IP_PC_DRONES: "${IP_PC_DRONES}"
-      TIMEOUT_BASE_2: "${TIMEOUT_BASE_2}"
-      TIMEOUT_BASE_3: "${TIMEOUT_BASE_3}"
-      TIMEOUT_BASE_4: "${TIMEOUT_BASE_4}"
-      HEARTBEAT_TIMEOUT: "${HEARTBEAT_TIMEOUT}"
+      # ... demais endereços ...
+      # Identidade Criptográfica Exclusiva da Base Leste
+      FABRIC_ORG_DOMAIN: "leste.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.leste.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   base_oeste:
     build:
@@ -107,19 +103,20 @@ services:
       MINHA_PORTA_UDP: "${PORTA_BASE_OESTE_UDP}"
       IP_MONITOR: "${IP_MONITOR}"
       IP_BASE_NORTE: "base_norte"
-      IP_BASE_SUL: "base_sul"
-      IP_BASE_LESTE: "base_leste"
-      PORTA_BASE_NORTE: "${PORTA_BASE_NORTE}"
-      PORTA_BASE_SUL: "${PORTA_BASE_SUL}"
-      PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
-      IP_PC_DRONES: "${IP_PC_DRONES}"
-      TIMEOUT_BASE_2: "${TIMEOUT_BASE_2}"
-      TIMEOUT_BASE_3: "${TIMEOUT_BASE_3}"
-      TIMEOUT_BASE_4: "${TIMEOUT_BASE_4}"
-      HEARTBEAT_TIMEOUT: "${HEARTBEAT_TIMEOUT}"
+      # ... demais endereços ...
+      # Identidade Criptográfica Exclusiva da Base Oeste
+      FABRIC_ORG_DOMAIN: "oeste.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.oeste.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
 networks:
   ormuz_net:
     driver: bridge
+  # Declara que a rede do Hyperledger existe fora deste compose e nós queremos nos conectar nela!
+  ormuz_fabric:
+    external: true

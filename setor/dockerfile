@@ -1,20 +1,18 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Avisa ao Python para procurar módulos dentro da pasta shared também
+# Instala a dependência que faltava para o Python conseguir falar com o Fabric
+RUN pip install --no-cache-dir fabric-sdk-py
+
 ENV PYTHONPATH="/app/shared"
 
-# 1. Copia a pasta shared
 COPY shared/ ./shared/
-# 2. Copia a pasta config
 COPY config/ ./config/
-
-# 3. Instala as dependências
 COPY fabric/connection-profile.json ./fabric/connection-profile.json
+COPY setor/ ./setor/
 
-# 4. Copia TODOS os arquivos da pasta setor
-COPY setor/ .
+WORKDIR /app/setor
 
-# 5. Inicia o broker
+EXPOSE 5001-5008
 CMD ["python", "broker_setor.py"]

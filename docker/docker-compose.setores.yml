@@ -18,7 +18,6 @@ services:
       SETOR_NOME: "Norte"
       MINHA_PORTA: "${PORTA_S1}"
       IP_MONITOR: "${IP_MONITOR}"
-      # Endereços das 4 bases (PC 2)
       IP_BASE_NORTE: "${IP_PC_BASES}"
       IP_BASE_SUL: "${IP_PC_BASES}"
       IP_BASE_LESTE: "${IP_PC_BASES}"
@@ -28,8 +27,15 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "NORTE,OESTE,LESTE,SUL"
+      # Credenciais e Autenticação no Fabric
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s2:
     build:
@@ -53,8 +59,14 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "SUL,LESTE,OESTE,NORTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s3:
     build:
@@ -78,8 +90,14 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "LESTE,NORTE,SUL,OESTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s4:
     build:
@@ -103,8 +121,14 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "OESTE,NORTE,SUL,LESTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s5:
     build:
@@ -128,8 +152,14 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "NORTE,LESTE,SUL,OESTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s6:
     build:
@@ -153,8 +183,14 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "LESTE,NORTE,SUL,OESTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s7:
     build:
@@ -178,8 +214,14 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "NORTE,SUL,LESTE,OESTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s8:
     build:
@@ -203,9 +245,20 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "LESTE,SUL,NORTE,OESTE"
+      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
 networks:
   ormuz_net:
     driver: bridge
+  # IMPORTANTE: Confirme se o nome da sua rede do Fabric é exatamente este.
+  # Se ao fazer "docker network ls" aparecer "fabric_default" ou "docker_ormuz_fabric", 
+  # altere apenas a linha abaixo para corresponder a esse nome.
+  ormuz_fabric:
+    external: true
