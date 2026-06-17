@@ -82,6 +82,17 @@ const SECTOR_LAYOUT = [
   {id:"S3",col:0,row:1},{id:"S4",col:1,row:1},{id:"S7",col:2,row:1},{id:"S8",col:3,row:1}
 ];
 
+// ── Economia e Auditoria (espelha o chaincode token_contrato.go) ────────────
+// Cada setor pertence a uma empresa — mesmo mapeamento do docker/.env
+const SECTOR_EMPRESA = {
+  S1:"EMPRESA-A", S2:"EMPRESA-B", S3:"EMPRESA-C", S4:"EMPRESA-D",
+  S5:"EMPRESA-E", S6:"EMPRESA-F", S7:"EMPRESA-G", S8:"EMPRESA-H"
+};
+const EMPRESAS = Object.values(SECTOR_EMPRESA);
+// Custo em tokens por criticidade — espelha config/custo_por_criticidade.json
+const CUSTO_POR_CRIT = {CRITICA:3, ALTA:2, BAIXA:1};
+const SALDO_INICIAL_EMPRESA = 200; // mesmo valor de fabric/init_ledger.sh
+
 let _uid=0;
 const uid = () => `R${++_uid}`;
 let lamportClock = 0;
@@ -94,13 +105,12 @@ let STATE = {
     {id:"DRONE-LESTE-1",base:"LESTE",state:"LIVRE",mission:null,port:7021},
     {id:"DRONE-OESTE-1",base:"OESTE",state:"LIVRE",mission:null,port:7031}
   ],
-  // ── NOVO: estado de cada base (true = online, false = offline/derrubada)
   bases: {NORTE:true, SUL:true, LESTE:true, OESTE:true},
   queue: [],
   events: [],
   lamport: 0,
   tab: "inject",
-  stats: {total:0,aceitas:0,concluidas:0,perdidos:0},
+  stats: {total:0, aceitas:0, concluidas:0, perdidos:0, rejeitados:0},
   bombarding: false, bombSent:0, bombTotal:0,
   bombCfg: {count:20,rate:3,sectors:"all",criticidade:"mixed"},
   newDrone: {id:"",base:"NORTE",port:7100},
@@ -108,14 +118,139 @@ let STATE = {
   autoSim: true,
   wsUrl: "ws://localhost:8001",
   wsStatus: "sim",
-  wsObj: null
+  wsObj: null,
+  // ── Ledger financeiro (espelha chaincode) ────────────────────────────────
+  carteiras: Object.fromEntries(EMPRESAS.map(e=>[e, SALDO_INICIAL_EMPRESA])),
+  ledger: [],          // cadeia de blocos (mais recente primeiro)
+  ledgerOk: null,      // null=não verificado / true=ok / false=adulterado
+  auditFiltroEmpresa: "TODAS",
+  auditFiltroTipo: "TODOS",
+  transferForm: {origem:"EMPRESA-A", destino:"EMPRESA-B", valor:20}
 };
 
 let bombTimer = null;
 let autoSimTimer = null;
 
+// ── Hash encadeado (FNV-1a 32-bit) ─────────────────────────────────────────
+// Simula o encadeamento de blocos da blockchain: cada bloco guarda o hash do
+// bloco anterior. Qualquer adulteração do conteúdo quebra a cadeia.
+function hashSimples(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8,"0");
+}
+
+function corpoCanonicoLedger(entry) {
+  // Exclui metadados de controle — só os dados de negócio entram no hash
+  const {id, ts, hash, hashAnterior, integro, ...dados} = entry;
+  return JSON.stringify(dados);
+}
+
+function calcularHashLedger(entry, hashAnteriorRef) {
+  return hashSimples(corpoCanonicoLedger(entry) + "|" + hashAnteriorRef);
+}
+
+// Registra um novo bloco encadeado ao hash do anterior (o mais recente está em [0])
+function registrarLedger(tipo, dados) {
+  const ts = new Date().toLocaleTimeString("pt-BR",{hour12:false});
+  const hashAnterior = STATE.ledger.length ? STATE.ledger[0].hash : "00000000";
+  const entry = {id:uid(), tipo, ts, ...dados, hashAnterior, integro:true};
+  entry.hash = calcularHashLedger(entry, hashAnterior);
+  STATE.ledger.unshift(entry);
+  if(STATE.ledger.length > 500) STATE.ledger.length = 500;
+  STATE.ledgerOk = null; // invalida verificação anterior
+  return entry;
+}
+
+// Percorre do bloco mais antigo ao mais recente e recomputa os hashes para
+// detectar adulterações — igual ao que o Hyperledger Fabric faz internamente
+// com o encadeamento de blocos no canal.
+function verificarIntegridadeLedger() {
+  const cronologico = [...STATE.ledger].reverse();
+  let anterior = "00000000";
+  let violacoes = 0;
+  cronologico.forEach(entry => {
+    const hashEsperado = calcularHashLedger(entry, entry.hashAnterior);
+    const ligacaoOk   = entry.hashAnterior === anterior;
+    const dadosOk     = hashEsperado === entry.hash;
+    entry.integro     = ligacaoOk && dadosOk;
+    if(!entry.integro) violacoes++;
+    anterior = entry.hash;
+  });
+  STATE.ledgerOk = violacoes === 0;
+  if(violacoes === 0) {
+    log(`✓ Integridade verificada: ${cronologico.length} blocos, nenhuma adulteração`,"success");
+  } else {
+    log(`⚠ ADULTERAÇÃO DETECTADA: ${violacoes} bloco(s) com hash inválido na cadeia!`,"warn");
+  }
+  render();
+}
+
+// Simula um nó malicioso editando o conteúdo de um bloco SEM recalcular o
+// hash — exatamente o ataque descrito no barema ("alterar manualmente um
+// registro na cópia local de um nó"). O botão de verificação depois detecta.
+function simularAdulteracaoLedger() {
+  if(STATE.ledger.length === 0) {
+    log("Nenhum bloco no ledger para adulterar ainda.","warn");
+    render();
+    return;
+  }
+  // Escolhe um bloco aleatório (prefere LAUDO ou AUTORIZACAO para ser mais dramático)
+  const candidatos = STATE.ledger.filter(e=>e.tipo==="LAUDO"||e.tipo==="AUTORIZACAO");
+  const alvo = candidatos.length ? candidatos[Math.floor(Math.random()*candidatos.length)]
+                                 : STATE.ledger[Math.floor(Math.random()*STATE.ledger.length)];
+  const tipoAlvo = alvo.tipo;
+  if(alvo.custo  !== undefined) alvo.custo  = 9999;
+  else if(alvo.valor !== undefined) alvo.valor = 9999;
+  else if(alvo.drone !== undefined) alvo.drone = "DRONE-FALSIFICADO";
+  else alvo.motivo = "(dado adulterado para teste)";
+  alvo.integro = undefined;
+  log(`🧪 Adulteração simulada no bloco ${alvo.id} [${tipoAlvo}] — hash NÃO foi recalculado. Clique em "Verificar Integridade" para provar que a rede detecta.`,"warn");
+  render();
+}
+
+// Recarga geral de carteiras (equivale a rodar init_ledger.sh novamente)
+function recarregarCarteiras() {
+  EMPRESAS.forEach(e => { STATE.carteiras[e] = SALDO_INICIAL_EMPRESA; });
+  registrarLedger("GENESE", {
+    empresa:"TODAS",
+    valor: SALDO_INICIAL_EMPRESA,
+    motivo:`Recarga geral — ${EMPRESAS.length} carteiras restauradas para ${SALDO_INICIAL_EMPRESA} tokens`
+  });
+  log(`↺ Todas as carteiras recarregadas para ${SALDO_INICIAL_EMPRESA} tokens`,"success");
+  render();
+}
+
+// TransferirTokens — espelha o chaincode Go
+function transferirTokens(origem, destino, valor) {
+  valor = Number(valor);
+  if(!valor || valor <= 0) { log("Valor de transferência inválido.","warn"); render(); return; }
+  if(origem === destino)   { log("Origem e destino devem ser diferentes.","warn"); render(); return; }
+  const saldoOrigem = STATE.carteiras[origem] ?? 0;
+  if(saldoOrigem < valor) {
+    registrarLedger("TRANSFERENCIA_NEGADA", {empresa:origem, destino, valor,
+      motivo:`Saldo insuficiente (necessário ${valor}tk, disponível ${saldoOrigem}tk)`});
+    log(`✕ Transferência negada: ${origem} não tem saldo suficiente para enviar ${valor}tk a ${destino}`,"warn");
+    render();
+    return;
+  }
+  STATE.carteiras[origem] -= valor;
+  STATE.carteiras[destino] = (STATE.carteiras[destino]||0) + valor;
+  registrarLedger("TRANSFERENCIA", {
+    empresa:origem, destino, valor,
+    saldoOrigem: STATE.carteiras[origem],
+    saldoDestino: STATE.carteiras[destino]
+  });
+  log(`💸 Transferência: ${origem} → ${destino} | ${valor} tokens | Novo saldo: ${STATE.carteiras[origem]}tk`,"success");
+  render();
+}
+
+// ── Fila e prioridade ───────────────────────────────────────────────────────
 function sortByPriority(q) {
-  return [...q].sort((a,b) => {
+  return [...q].sort((a,b)=>{
     const pa=CRIT_PESO[a.crit]||1, pb=CRIT_PESO[b.crit]||1;
     if(pb!==pa) return pb-pa;
     if(a.ts!==b.ts) return a.ts-b.ts;
@@ -126,55 +261,92 @@ function sortByPriority(q) {
 function log(msg, level="info") {
   const ts = new Date().toLocaleTimeString("pt-BR",{hour12:false});
   STATE.events.unshift({id:uid(),ts,msg,level});
-  if(STATE.events.length>150) STATE.events.length=150;
+  if(STATE.events.length>200) STATE.events.length=200;
 }
 
-// ── FIX #1: processQueue agora:
-//   a) só usa drones de bases ONLINE (STATE.bases[d.base])
-//   b) só libera o drone no callback se ele ainda estiver OCUPADO
-//      (evita reviver drones derrubados mid-missão)
+// ── processQueue com pagamento antes do despacho (AutorizarPagamento) ───────
+// Garante anti-duplo-gasto: o saldo é debitado do ledger ANTES do drone ser
+// ocupado. Se não houver saldo, a requisição é REJEITADA (estado terminal).
 function processQueue() {
   const pending = STATE.queue.filter(r=>r.status==="PENDENTE");
   if(!pending.length) return;
   const sorted = sortByPriority(pending);
-  // a) filtra por base online
   const free = STATE.drones.find(d=>d.state==="LIVRE" && STATE.bases[d.base]);
   if(!free) return;
-  const req = sorted[0];
-  const ts = lamportClock;
-  req.status="ACEITA"; req.drone=free.id;
-  free.state="OCUPADO"; free.mission=req.id;
-  log(`[${free.base}] Aceitou ${req.id} -> ${free.id.split("-").slice(1).join("-")} | L=${ts}`,"success");
-  STATE.stats.aceitas++;
-  const dur = 8000+Math.random()*12000;
-  // b) captura referência e checa estado antes de liberar
-  const capturedDrone = free;
-  const capturedReq = req;
-  setTimeout(()=>{
-    // só libera se o drone ainda estiver OCUPADO (não foi derrubado)
-    if(capturedDrone.state === "OCUPADO") {
-      capturedDrone.state="LIVRE"; capturedDrone.mission=null;
-      capturedReq.status="CONCLUIDA";
-      log(`Missao ${capturedReq.id} concluida por ${capturedDrone.id.split("-").slice(1).join("-")}`,"success");
-      STATE.stats.concluidas++;
-      setTimeout(processQueue,100);
-      render();
+
+  for (const req of sorted) {
+    const custo = CUSTO_POR_CRIT[req.crit] || 1;
+    const empresa = req.empresa || SECTOR_EMPRESA[req.sector] || "EMPRESA-A";
+    const saldo = STATE.carteiras[empresa] ?? 0;
+
+    if(saldo < custo) {
+      // Pagamento negado — ANTES de ocupar o drone
+      req.status = "REJEITADA";
+      STATE.stats.rejeitados++;
+      registrarLedger("REJEICAO", {
+        empresa, requisicao:req.id, custo, saldo,
+        motivo:`Saldo insuficiente (necessário ${custo}tk, disponível ${saldo}tk)`
+      });
+      log(`✕ Pagamento NEGADO | req ${req.id} (${req.sector}) | ${empresa} precisa de ${custo}tk, tem ${saldo}tk — drone NÃO despachado`,"warn");
+      continue;
     }
-  }, dur);
+
+    // Autorizar pagamento — débito imediato no ledger
+    STATE.carteiras[empresa] -= custo;
+    registrarLedger("AUTORIZACAO", {
+      empresa, requisicao:req.id, custo,
+      saldoRestante: STATE.carteiras[empresa]
+    });
+
+    const ts = lamportClock;
+    req.status = "ACEITA";
+    req.drone  = free.id;
+    free.state = "OCUPADO";
+    free.mission = req.id;
+    log(`[${free.base}] Aceitou ${req.id} → ${free.id.replace("DRONE-","")} | ${empresa} debitou ${custo}tk (restam ${STATE.carteiras[empresa]}tk) | L=${ts}`,"success");
+    STATE.stats.aceitas++;
+
+    const dur = 8000 + Math.random()*12000;
+    const capturedDrone = free;
+    const capturedReq   = req;
+    setTimeout(()=>{
+      if(capturedDrone.state === "OCUPADO") {
+        capturedDrone.state = "LIVRE";
+        capturedDrone.mission = null;
+        capturedReq.status = "CONCLUIDA";
+        STATE.stats.concluidas++;
+        // RegistrarLaudo — laudo imutável, nenhum token é movido
+        registrarLedger("LAUDO", {
+          empresa:capturedReq.empresa || SECTOR_EMPRESA[capturedReq.sector],
+          requisicao: capturedReq.id,
+          drone: capturedDrone.id,
+          setor: capturedReq.sector,
+          tipo: capturedReq.tipo,
+          criticidade: capturedReq.crit
+        });
+        log(`✓ Missão ${capturedReq.id} concluída por ${capturedDrone.id.replace("DRONE-","")} — laudo registrado no ledger`,"success");
+        setTimeout(processQueue,100);
+        render();
+      }
+    }, dur);
+    render();
+    return;
+  }
+  render();
 }
 
 function injectAlert(sector, tipo, crit) {
   const ts = incLamport();
   const id = uid();
-  const req = {id,sector,tipo,crit,ts,status:"PENDENTE",drone:null};
+  const empresa = SECTOR_EMPRESA[sector] || "EMPRESA-A";
+  const req = {id, sector, tipo, crit, ts, status:"PENDENTE", drone:null, empresa};
   const lvl = crit==="CRITICA"?"critica":crit==="ALTA"?"alta":"info";
-  log(`ALERTA ${sector} | ${tipo.replace(/_/g," ")} [${crit}] | L=${ts}`,lvl);
+  log(`ALERTA ${sector} [${empresa}] | ${tipo.replace(/_/g," ")} [${crit}] | L=${ts}`,lvl);
   STATE.stats.total++;
   STATE.queue.push(req);
   STATE.queue = sortByPriority(STATE.queue);
   STATE.lamport = lamportClock;
   const order = PRIORITY_TABLE[sector]||["NORTE","SUL","LESTE","OESTE"];
-  // determina posição de prioridade levando em conta bases offline
   const onlineOrder = order.filter(b=>STATE.bases[b]);
   const pos = onlineOrder.length > 0 ? 1 : 4;
   const tmo = TIMEOUT_MS[pos]??600;
@@ -224,14 +396,13 @@ function killDrone(droneId) {
   const d=STATE.drones.find(x=>x.id===droneId);
   if(!d) return;
   d.state="PERDIDO";
-  log(`Drone ${droneId.split("-").slice(1).join("-")} marcado PERDIDO`,"warn");
+  log(`Drone ${droneId.replace("DRONE-","")} marcado PERDIDO`,"warn");
   STATE.stats.perdidos++;
   if(d.mission){
     const req=STATE.queue.find(r=>r.id===d.mission);
     if(req){req.status="PENDENTE";req.drone=null;}
     log(`Missao ${d.mission} devolvida a fila`,"info");
     d.mission=null;
-    // FIX #1 aplicado aqui também: só processa fila se houver base online com drone livre
     setTimeout(()=>{processQueue();render();},300);
   }
   render();
@@ -240,44 +411,35 @@ function killDrone(droneId) {
 function reviveDrone(droneId) {
   const d=STATE.drones.find(x=>x.id===droneId);
   if(!d) return;
-  // só revive se a base do drone estiver online
   if(!STATE.bases[d.base]) {
-    log(`Drone ${droneId.split("-").slice(1).join("-")} nao pode reviver — base ${d.base} offline`,"warn");
-    render();
-    return;
+    log(`Drone ${droneId.replace("DRONE-","")} não pode reviver — base ${d.base} offline`,"warn");
+    render(); return;
   }
   d.state="LIVRE"; d.mission=null;
-  log(`Drone ${droneId.split("-").slice(1).join("-")} reconectado`,"success");
+  log(`Drone ${droneId.replace("DRONE-","")} reconectado`,"success");
   setTimeout(()=>{processQueue();render();},200);
   render();
 }
 
 function removeDrone(droneId) {
   STATE.drones=STATE.drones.filter(d=>d.id!==droneId);
-  log(`Drone ${droneId.split("-").slice(1).join("-")} removido`,"warn");
+  log(`Drone ${droneId.replace("DRONE-","")} removido`,"warn");
   render();
 }
-
-// ── NOVO: killBase / reviveBase ───────────────────────────────────────────────
 
 function killBase(baseId) {
   if(!STATE.bases[baseId]) return;
   STATE.bases[baseId] = false;
-  // Derruba todos os drones da base (os OCUPADOS devolvem missão à fila via killDrone)
-  STATE.drones
-    .filter(d => d.base === baseId && d.state !== "PERDIDO")
-    .forEach(d => {
-      d.state = "PERDIDO";
-      STATE.stats.perdidos++;
-      if(d.mission) {
-        const req = STATE.queue.find(r => r.id === d.mission);
-        if(req){ req.status="PENDENTE"; req.drone=null; }
-        log(`Missao ${d.mission} devolvida — base ${baseId} caiu`,"info");
-        d.mission = null;
-      }
-    });
+  STATE.drones.filter(d=>d.base===baseId && d.state!=="PERDIDO").forEach(d=>{
+    d.state="PERDIDO"; STATE.stats.perdidos++;
+    if(d.mission){
+      const req=STATE.queue.find(r=>r.id===d.mission);
+      if(req){req.status="PENDENTE";req.drone=null;}
+      log(`Missao ${d.mission} devolvida — base ${baseId} caiu`,"info");
+      d.mission=null;
+    }
+  });
   log(`⚠ Base ${baseId} DESATIVADA — todos os drones offline`,"warn");
-  // tenta realocar pendentes nas bases restantes
   setTimeout(()=>{processQueue();render();},300);
   render();
 }
@@ -285,10 +447,8 @@ function killBase(baseId) {
 function reviveBase(baseId) {
   if(STATE.bases[baseId]) return;
   STATE.bases[baseId] = true;
-  // Revive os drones PERDIDOS dessa base
-  STATE.drones
-    .filter(d => d.base === baseId && d.state === "PERDIDO")
-    .forEach(d => { d.state="LIVRE"; d.mission=null; });
+  STATE.drones.filter(d=>d.base===baseId && d.state==="PERDIDO")
+    .forEach(d=>{d.state="LIVRE"; d.mission=null;});
   log(`✔ Base ${baseId} RESTAURADA — drones reconectados`,"success");
   setTimeout(()=>{processQueue();render();},200);
   render();
@@ -301,9 +461,19 @@ function connectWs() {
     ws.onmessage=(e)=>{
       try{
         const m=JSON.parse(e.data);
-        if(m.tipo==="DRONE_DESPACHADO") log(`[${m.base}] ${m.drone} -> Setor ${m.setor}`,"success");
-        else if(m.tipo==="MISSAO_CONCLUIDA") log(`Missao concluida: drone ${m.drone}`,"success");
-        else if(m.tipo==="ALERTA_GERADO") injectAlert(m.setor, m.tipo_ocorrencia || "anomalia_menor", m.criticidade);
+        if(m.tipo==="DRONE_DESPACHADO") log(`[${m.base}] ${m.drone} → Setor ${m.setor}`,"success");
+        else if(m.tipo==="MISSAO_CONCLUIDA") log(`Missão concluída: drone ${m.drone}`,"success");
+        else if(m.tipo==="ALERTA_GERADO") injectAlert(m.setor, m.tipo_ocorrencia||"anomalia_menor", m.criticidade);
+        else if(m.tipo==="PAGAMENTO_RECUSADO") log(`✕ Pagamento recusado pelo ledger real: ${m.motivo}`,"warn");
+        // Resposta da bridge para consultas ao Fabric real
+        else if(m.tipo_resposta==="SALDO") {
+          log(`[Fabric] Saldo ${m.empresa}: ${m.saldo ?? "N/D"} (status: ${m.status})`,"info");
+        } else if(m.tipo_resposta==="AUDITORIA") {
+          log(`[Fabric] Auditoria ${m.empresa}: ${(m.transacoes||[]).length} transações`,"info");
+        } else if(m.tipo_resposta==="TRANSFERENCIA") {
+          if(m.sucesso) log(`[Fabric] Transferência confirmada no ledger real`,"success");
+          else log(`[Fabric] Transferência negada: ${m.motivo}`,"warn");
+        }
         render();
       }catch(e2){}
     };
@@ -312,6 +482,15 @@ function connectWs() {
     STATE.wsObj=ws;
     render();
   }catch(e){STATE.wsStatus="error";log("Falha: "+e.message,"warn");render();}
+}
+
+// Envia uma chamada para o Fabric real via WebSocket bidirecional (monitor_bridge.py)
+function chamarFabric(payload) {
+  if(STATE.wsStatus!=="connected" || !STATE.wsObj) {
+    log("Bridge não conectada. Use a aba Bridge para conectar ao sistema real.","warn");
+    render(); return;
+  }
+  STATE.wsObj.send(JSON.stringify(payload));
 }
 
 function startAutoSim() {
@@ -326,24 +505,39 @@ function startAutoSim() {
   },4500);
 }
 
-// ─── RENDER ───────────────────────────────────────────────────────────────────
+// ─── Helpers de cor ────────────────────────────────────────────────────────
 function c_crit(c){return{CRITICA:"var(--color-text-danger)",ALTA:"var(--color-text-warning)",BAIXA:"var(--color-text-info)"}[c]||"var(--color-text-secondary)"}
 function bg_crit(c){return{CRITICA:"var(--color-background-danger)",ALTA:"var(--color-background-warning)",BAIXA:"var(--color-background-info)"}[c]||"var(--color-background-secondary)"}
 function c_state(s){return{LIVRE:"var(--color-text-success)",OCUPADO:"var(--color-text-warning)",PERDIDO:"var(--color-text-danger)"}[s]||"var(--color-text-secondary)"}
 function bg_state(s){return{LIVRE:"var(--color-background-success)",OCUPADO:"var(--color-background-warning)",PERDIDO:"var(--color-background-danger)"}[s]||"var(--color-background-secondary)"}
 function c_log(l){return{success:"var(--color-text-success)",warn:"var(--color-text-warning)",critica:"var(--color-text-danger)",alta:"var(--color-text-warning)",info:"var(--color-text-secondary)"}[l]||"var(--color-text-secondary)"}
 
+function tipoLedgerLabel(tipo) {
+  return {
+    AUTORIZACAO:"💳 Pagamento", LAUDO:"📋 Laudo", REJEICAO:"✕ Rejeição",
+    TRANSFERENCIA:"💸 Transferência", TRANSFERENCIA_NEGADA:"✕ Transf. Negada",
+    GENESE:"🌱 Gênese"
+  }[tipo] || tipo;
+}
+function corLedger(tipo, integro) {
+  if(integro === false) return "var(--color-text-danger)";
+  return {
+    AUTORIZACAO:"var(--color-text-info)", LAUDO:"var(--color-text-success)",
+    REJEICAO:"var(--color-text-danger)", TRANSFERENCIA:"var(--color-text-warning)",
+    TRANSFERENCIA_NEGADA:"var(--color-text-danger)", GENESE:"var(--color-text-tertiary)"
+  }[tipo]||"var(--color-text-secondary)";
+}
+
+// ─── Mapa tático ───────────────────────────────────────────────────────────
 function renderMap() {
   const sW=64,sH=54,mX=8,mY=26,gX=4,gY=4;
   const totalW=mX*2+4*sW+3*gX;
   const totalH=mY*2+2*sH+gY;
-
   const pendByS={},actByS={};
   STATE.queue.forEach(r=>{
     if(r.status==="PENDENTE") pendByS[r.sector]=(pendByS[r.sector]||0)+1;
     if(r.status==="ACEITA") actByS[r.sector]=r.crit;
   });
-
   let sectors="",dronePts="";
   SECTOR_LAYOUT.forEach(({id,col,row})=>{
     const x=mX+col*(sW+gX), y=mY+row*(sH+gY);
@@ -352,41 +546,38 @@ function renderMap() {
     const fillMap={danger:"rgba(209,55,55,0.18)",warning:"rgba(186,117,23,0.15)",info:"rgba(24,95,165,0.12)",none:"var(--color-background-primary)"};
     const strMap={danger:"var(--color-border-danger)",warning:"var(--color-border-warning)",info:"var(--color-border-info)",none:"var(--color-border-secondary)"};
     const prio=(PRIORITY_TABLE[id]||[]).map(b=>b[0]).join(">");
+    const emp=SECTOR_EMPRESA[id]||"";
+    const saldo=STATE.carteiras[emp]??0;
+    const saldoColor=saldo<10?"var(--color-text-danger)":saldo<50?"var(--color-text-warning)":"var(--color-text-tertiary)";
     sectors+=`<g>
       <rect x="${x}" y="${y}" width="${sW}" height="${sH}" rx="5" fill="${fillMap[fl]}" stroke="${strMap[fl]}" stroke-width="0.5"/>
-      <text x="${x+sW/2}" y="${y+18}" text-anchor="middle" style="font-size:12px;font-weight:500;font-family:var(--font-mono)" fill="var(--color-text-primary)">${id}</text>
-      <text x="${x+sW/2}" y="${y+31}" text-anchor="middle" style="font-size:8px;font-family:var(--font-mono)" fill="var(--color-text-tertiary)">${prio}</text>
+      <text x="${x+sW/2}" y="${y+16}" text-anchor="middle" style="font-size:12px;font-weight:500;font-family:var(--font-mono)" fill="var(--color-text-primary)">${id}</text>
+      <text x="${x+sW/2}" y="${y+27}" text-anchor="middle" style="font-size:7px;font-family:var(--font-mono)" fill="var(--color-text-tertiary)">${prio}</text>
+      <text x="${x+sW/2}" y="${y+40}" text-anchor="middle" style="font-size:8px;font-family:var(--font-mono)" fill="${saldoColor}">${saldo}tk</text>
       ${p>0?`<circle cx="${x+sW-9}" cy="${y+9}" r="8" fill="${fl==="danger"?"rgba(209,55,55,0.3)":"rgba(186,117,23,0.3)"}" stroke="${strMap[fl]}" stroke-width="0.5"/>
       <text x="${x+sW-9}" y="${y+9}" text-anchor="middle" dominant-baseline="central" style="font-size:8px;font-weight:500;font-family:var(--font-mono)" fill="${fl==="danger"?"var(--color-text-danger)":"var(--color-text-warning)"}">${p}</text>`:""}
       ${a?`<circle cx="${x+9}" cy="${y+9}" r="5" fill="rgba(24,95,165,0.3)" stroke="var(--color-border-info)" stroke-width="0.5"/>
       <text x="${x+9}" y="${y+9}" text-anchor="middle" dominant-baseline="central" style="font-size:7px" fill="var(--color-text-info)">A</text>`:""}
     </g>`;
   });
-
   const bases=["NORTE","SUL","LESTE","OESTE"];
   let baseLabels="";
   bases.forEach(base=>{
-    const online = STATE.bases[base];
+    const online=STATE.bases[base];
     const drs=STATE.drones.filter(d=>d.base===base);
     const free=drs.filter(d=>d.state==="LIVRE").length;
     const lost=drs.filter(d=>d.state==="PERDIDO").length;
-    // ── NOVO: base offline = sempre vermelho + risco visual
-    const col = !online ? "var(--color-text-danger)"
-               : lost>0 ? "var(--color-text-danger)"
-               : free>0 ? "var(--color-text-success)"
-               : "var(--color-text-warning)";
+    const col=!online?"var(--color-text-danger)":lost>0?"var(--color-text-danger)":free>0?"var(--color-text-success)":"var(--color-text-warning)";
     let bx,by,anchor="middle";
     if(base==="NORTE"){bx=totalW/2;by=13;}
     else if(base==="SUL"){bx=totalW/2;by=totalH-4;}
     else if(base==="OESTE"){bx=3;by=totalH/2-5;anchor="start";}
     else{bx=totalW-3;by=totalH/2-5;anchor="end";}
-    // label com indicador OFFLINE
-    const label = online ? `${base} [${free}/${drs.length}]` : `${base} ✕OFFLINE`;
+    const label=online?`${base} [${free}/${drs.length}]`:`${base} ✕OFFLINE`;
     baseLabels+=`<text x="${bx}" y="${by}" text-anchor="${anchor}" style="font-size:8px;font-weight:500;font-family:var(--font-mono)" fill="${col}">${label}</text>`;
-
     drs.forEach((drone,i)=>{
-      const stC = !online ? "var(--color-text-danger)" : c_state(drone.state);
-      const op = (!online || drone.state==="PERDIDO") ? 0.25 : 1;
+      const stC=!online?"var(--color-text-danger)":c_state(drone.state);
+      const op=(!online||drone.state==="PERDIDO")?0.25:1;
       let dx,dy;
       if(base==="NORTE"){dx=totalW/2-((drs.length-1)*8)+i*16;dy=20;}
       else if(base==="SUL"){dx=totalW/2-((drs.length-1)*8)+i*16;dy=totalH-14;}
@@ -395,26 +586,24 @@ function renderMap() {
       dronePts+=`<polygon points="${dx},${dy-5} ${dx-5},${dy+4} ${dx+5},${dy+4}" fill="${stC}" opacity="${op}" stroke="none"/>`;
     });
   });
-
   return `<svg width="100%" viewBox="0 0 ${totalW} ${totalH}" style="display:block">
     ${baseLabels}${sectors}${dronePts}
   </svg>`;
 }
 
 function renderDroneCard(d) {
-  const shortId=d.id.replace("DRONE-","");
   const mShort=d.mission?d.mission.slice(0,6):"—";
-  const baseOnline = STATE.bases[d.base];
+  const baseOnline=STATE.bases[d.base];
   return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:var(--border-radius-md);background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);margin-bottom:5px;opacity:${!baseOnline?'0.55':'1'}">
     <div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${c_state(d.state)}"></div>
     <div style="flex:1;min-width:0">
       <div class="mono" style="font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-primary)">${d.id}</div>
-      <div style="font-size:10px;color:var(--color-text-secondary)">Base: ${d.base}${!baseOnline?' <span style="color:var(--color-text-danger)">[OFFLINE]</span>':''} · P:${d.port} · Missao:${mShort}</div>
+      <div style="font-size:10px;color:var(--color-text-secondary)">Base:${d.base}${!baseOnline?' <span style="color:var(--color-text-danger)">[OFFLINE]</span>':''} · P:${d.port} · Missao:${mShort}</div>
     </div>
     <span class="badge" style="background:${bg_state(d.state)};color:${c_state(d.state)};border-color:${c_state(d.state)}22">${d.state}</span>
     <div style="display:flex;gap:4px;flex-shrink:0">
-      ${d.state==="PERDIDO"&&baseOnline?`<button onclick="reviveDrone('${d.id}')" style="font-size:10px;padding:2px 7px;color:var(--color-text-success)">↺ Reconectar</button>`:""}
-      ${d.state==="LIVRE"&&baseOnline?`<button onclick="killDrone('${d.id}')" style="font-size:10px;padding:2px 7px;color:var(--color-text-danger)">✕ Derrubar</button>`:""}
+      ${d.state==="PERDIDO"&&baseOnline?`<button onclick="reviveDrone('${d.id}')" style="font-size:10px;padding:2px 7px;color:var(--color-text-success)">↺</button>`:""}
+      ${d.state==="LIVRE"&&baseOnline?`<button onclick="killDrone('${d.id}')" style="font-size:10px;padding:2px 7px;color:var(--color-text-danger)">✕</button>`:""}
       ${d.state!=="OCUPADO"?`<button onclick="removeDrone('${d.id}')" style="font-size:10px;padding:2px 5px">−</button>`:""}
     </div>
   </div>`;
@@ -422,17 +611,178 @@ function renderDroneCard(d) {
 
 function renderQueueItem(r) {
   const done=r.status==="CONCLUIDA";
+  const rej=r.status==="REJEITADA";
   const active=r.status==="ACEITA";
-  return `<div style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:var(--border-radius-md);background:${active?"var(--color-background-info)":"var(--color-background-primary)"};border:0.5px solid var(--color-border-tertiary);margin-bottom:3px;opacity:${done?"0.45":"1"}">
-    <div style="width:7px;height:7px;border-radius:50%;flex-shrink:0;background:${done?"var(--color-text-tertiary)":c_crit(r.crit)}"></div>
+  const bg=active?"var(--color-background-info)":rej?"var(--color-background-danger)":"var(--color-background-primary)";
+  const statusLabel=r.status==="PENDENTE"?"PEND":r.status==="ACEITA"?"ATIVO":r.status==="REJEITADA"?"REJ":"OK";
+  const statusColor=r.status==="PENDENTE"?"var(--color-text-warning)":r.status==="ACEITA"?"var(--color-text-info)":r.status==="REJEITADA"?"var(--color-text-danger)":"var(--color-text-tertiary)";
+  return `<div style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:var(--border-radius-md);background:${bg};border:0.5px solid var(--color-border-tertiary);margin-bottom:3px;opacity:${done||rej?"0.5":"1"}">
+    <div style="width:7px;height:7px;border-radius:50%;flex-shrink:0;background:${(done||rej)?"var(--color-text-tertiary)":c_crit(r.crit)}"></div>
     <span class="mono" style="font-size:11px;font-weight:500;min-width:22px;color:var(--color-text-primary)">${r.sector}</span>
     <span style="flex:1;font-size:10px;color:var(--color-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.tipo.replace(/_/g," ")}</span>
-    <span class="badge" style="background:${done?"var(--color-background-secondary)":bg_crit(r.crit)};color:${done?"var(--color-text-tertiary)":c_crit(r.crit)};border-color:${done?"transparent":c_crit(r.crit)+"33"}">${r.crit.slice(0,3)}</span>
-    <span class="mono" style="font-size:9px;min-width:32px;text-align:right;color:${r.status==="PENDENTE"?"var(--color-text-warning)":r.status==="ACEITA"?"var(--color-text-info)":"var(--color-text-tertiary)"}">${r.status==="PENDENTE"?"PEND":r.status==="ACEITA"?"ATIVO":"OK"}</span>
+    <span class="badge" style="background:${(done||rej)?"var(--color-background-secondary)":bg_crit(r.crit)};color:${(done||rej)?"var(--color-text-tertiary)":c_crit(r.crit)};border-color:transparent">${r.crit.slice(0,3)}</span>
+    <span class="mono" style="font-size:9px;min-width:32px;text-align:right;color:${statusColor}">${statusLabel}</span>
     <span class="mono" style="font-size:9px;color:var(--color-text-tertiary);min-width:30px">L:${r.ts}</span>
   </div>`;
 }
 
+// ─── Aba Auditoria / Financeiro ────────────────────────────────────────────
+function renderAuditoria() {
+  const filtroEmp = STATE.auditFiltroEmpresa;
+  const filtroTipo = STATE.auditFiltroTipo;
+  const tf = STATE.transferForm;
+
+  const blocosFiltrados = STATE.ledger.filter(e => {
+    const empMatch = filtroEmp==="TODAS" || e.empresa===filtroEmp || e.destino===filtroEmp;
+    const tipoMatch = filtroTipo==="TODOS" || e.tipo===filtroTipo;
+    return empMatch && tipoMatch;
+  });
+
+  const totalTokens = Object.values(STATE.carteiras).reduce((s,v)=>s+v,0);
+  const blocoCount  = STATE.ledger.length;
+  const adulterados = STATE.ledger.filter(e=>e.integro===false).length;
+  const integridadeColor = STATE.ledgerOk===null?"var(--color-text-warning)":STATE.ledgerOk?"var(--color-text-success)":"var(--color-text-danger)";
+  const integridadeLabel = STATE.ledgerOk===null?"NÃO VERIFICADO":STATE.ledgerOk?"✓ ÍNTEGRO":"⚠ ADULTERADO";
+
+  return `
+  <!-- Sumário do ledger -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px">
+    ${[
+      {l:"BLOCOS",v:blocoCount,c:"var(--color-text-primary)"},
+      {l:"TOKENS TOTAL",v:totalTokens,c:"var(--color-text-info)"},
+      {l:"REJEITADAS",v:STATE.stats.rejeitados,c:"var(--color-text-danger)"},
+      {l:"INTEGRIDADE",v:integridadeLabel,c:integridadeColor},
+    ].map(x=>`<div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:6px 8px;text-align:center">
+      <div style="font-size:9px;color:var(--color-text-tertiary);margin-bottom:2px">${x.l}</div>
+      <div class="mono" style="font-size:12px;font-weight:500;color:${x.c}">${x.v}</div>
+    </div>`).join("")}
+  </div>
+
+  <!-- Carteiras das empresas -->
+  <div style="margin-bottom:12px">
+    <div style="font-size:12px;font-weight:500;margin-bottom:6px;color:var(--color-text-primary)">Carteiras das Empresas</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+      ${EMPRESAS.map(e=>{
+        const s=STATE.carteiras[e]??0;
+        const sc=s===0?"var(--color-text-danger)":s<30?"var(--color-text-warning)":"var(--color-text-success)";
+        return `<div style="padding:6px 8px;background:var(--color-background-primary);border:0.5px solid ${s===0?"var(--color-border-danger)":s<30?"var(--color-border-warning)":"var(--color-border-tertiary)"};border-radius:var(--border-radius-md);text-align:center">
+          <div style="font-size:9px;color:var(--color-text-tertiary);margin-bottom:2px">${e.replace("EMPRESA-","EMP-")}</div>
+          <div class="mono" style="font-size:14px;font-weight:500;color:${sc}">${s}</div>
+          <div style="font-size:8px;color:var(--color-text-tertiary)">tokens</div>
+        </div>`;
+      }).join("")}
+    </div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button onclick="recarregarCarteiras()" style="font-size:11px;padding:4px 10px;color:var(--color-text-success);border-color:var(--color-border-success)44;flex:1">↺ Recarregar Carteiras (init_ledger)</button>
+      ${STATE.wsStatus==="connected"?`<button onclick="EMPRESAS.forEach(e=>chamarFabric({tipo:'GET_SALDO',empresa:e}))" style="font-size:11px;padding:4px 10px;color:var(--color-text-info);border-color:var(--color-border-info)44;flex:1">🔗 Consultar Saldos no Fabric Real</button>`:""}
+    </div>
+  </div>
+
+  <!-- Transferência entre empresas -->
+  <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px;margin-bottom:12px">
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--color-text-primary)">Transferência de Tokens (TransferirTokens)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:6px;margin-bottom:6px">
+      <div>
+        <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:3px">Origem</div>
+        <select onchange="STATE.transferForm.origem=this.value">
+          ${EMPRESAS.map(e=>`<option value="${e}" ${tf.origem===e?"selected":""}>${e} (${STATE.carteiras[e]??0}tk)</option>`).join("")}
+        </select>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:3px">Destino</div>
+        <select onchange="STATE.transferForm.destino=this.value">
+          ${EMPRESAS.map(e=>`<option value="${e}" ${tf.destino===e?"selected":""}>${e} (${STATE.carteiras[e]??0}tk)</option>`).join("")}
+        </select>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:3px">Valor (tk)</div>
+        <input type="number" min="1" value="${tf.valor}" oninput="STATE.transferForm.valor=+this.value">
+      </div>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button onclick="transferirTokens(STATE.transferForm.origem,STATE.transferForm.destino,STATE.transferForm.valor)" style="flex:1;padding:7px;font-weight:500;background:var(--color-background-warning);color:var(--color-text-warning);border-color:var(--color-border-warning)22">
+        💸 Executar Transferência
+      </button>
+      ${STATE.wsStatus==="connected"?`<button onclick="chamarFabric({tipo:'TRANSFERIR',origem:STATE.transferForm.origem,destino:STATE.transferForm.destino,valor:STATE.transferForm.valor})" style="flex:1;padding:7px;font-weight:500;background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info)22">🔗 Executar no Fabric Real</button>`:""}
+    </div>
+  </div>
+
+  <!-- Integridade do ledger -->
+  <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px;margin-bottom:12px">
+    <div style="font-size:12px;font-weight:500;margin-bottom:6px;color:var(--color-text-primary)">Log Imutável — Teste de Adulteração</div>
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px">
+      Cada bloco guarda o hash do bloco anterior. Adulterar um bloco sem recalcular quebra a cadeia — detectável por qualquer nó do consórcio.
+    </div>
+    <div style="display:flex;gap:6px">
+      <button onclick="verificarIntegridadeLedger()" style="flex:1;padding:7px;font-weight:500;background:var(--color-background-success);color:var(--color-text-success);border-color:var(--color-border-success)22">
+        🔍 Verificar Integridade da Cadeia
+      </button>
+      <button onclick="simularAdulteracaoLedger()" style="flex:1;padding:7px;font-weight:500;background:var(--color-background-danger);color:var(--color-text-danger);border-color:var(--color-border-danger)22">
+        🧪 Simular Adulteração de Bloco
+      </button>
+    </div>
+    ${adulterados>0?`<div style="margin-top:8px;padding:8px;background:var(--color-background-danger);border:0.5px solid var(--color-border-danger);border-radius:var(--border-radius-md);font-size:11px;color:var(--color-text-danger)">
+      ⚠ ${adulterados} bloco(s) com hash inválido detectados. Clique em "Verificar Integridade" para confirmar.
+    </div>`:""}
+  </div>
+
+  <!-- Filtros + lista de blocos -->
+  <div style="display:flex;gap:6px;margin-bottom:8px">
+    <div style="flex:1">
+      <select onchange="STATE.auditFiltroEmpresa=this.value;render()">
+        <option value="TODAS" ${filtroEmp==="TODAS"?"selected":""}>Todas as empresas</option>
+        ${EMPRESAS.map(e=>`<option value="${e}" ${filtroEmp===e?"selected":""}>${e}</option>`).join("")}
+      </select>
+    </div>
+    <div style="flex:1">
+      <select onchange="STATE.auditFiltroTipo=this.value;render()">
+        ${["TODOS","AUTORIZACAO","LAUDO","REJEICAO","TRANSFERENCIA","TRANSFERENCIA_NEGADA","GENESE"]
+          .map(t=>`<option value="${t}" ${filtroTipo===t?"selected":""}>${t==="TODOS"?"Todos os tipos":tipoLedgerLabel(t)}</option>`).join("")}
+      </select>
+    </div>
+    <button onclick="STATE.ledger=[];STATE.ledgerOk=null;render()" style="font-size:11px;padding:4px 8px">🗑 Limpar</button>
+  </div>
+
+  <div class="scroll" style="max-height:280px">
+    ${blocosFiltrados.length===0
+      ?`<div style="text-align:center;padding:20px;color:var(--color-text-tertiary);font-size:12px">Nenhum bloco no ledger ainda — injete alertas para gerar transações</div>`
+      :blocosFiltrados.slice(0,80).map(e=>{
+        const integroIcon = e.integro===undefined?"⬜":e.integro?"✓":"✗ ADULTERADO";
+        const integroColor = e.integro===undefined?"var(--color-text-tertiary)":e.integro?"var(--color-text-success)":"var(--color-text-danger)";
+        const cor = corLedger(e.tipo, e.integro===false?false:undefined);
+        let detalhe = "";
+        if(e.tipo==="AUTORIZACAO") detalhe=`${e.empresa} −${e.custo}tk → req ${(e.requisicao||"").slice(0,6)} | restam ${e.saldoRestante}tk`;
+        else if(e.tipo==="LAUDO")  detalhe=`${e.drone?.replace("DRONE-","")??""} → setor ${e.setor} | ${e.tipo||""} [${e.criticidade||""}]`;
+        else if(e.tipo==="REJEICAO") detalhe=`${e.empresa} | ${e.motivo}`;
+        else if(e.tipo==="TRANSFERENCIA") detalhe=`${e.empresa} → ${e.destino} | ${e.valor}tk`;
+        else if(e.tipo==="TRANSFERENCIA_NEGADA") detalhe=`${e.empresa} → ${e.destino} | ${e.motivo}`;
+        else if(e.tipo==="GENESE") detalhe=e.motivo||"";
+        return `<div style="display:flex;gap:6px;padding:5px 8px;border-radius:var(--border-radius-md);background:var(--color-background-primary);border:0.5px solid ${e.integro===false?"var(--color-border-danger)":"var(--color-border-tertiary)"};margin-bottom:3px">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:2px;flex-shrink:0;min-width:16px">
+            <div style="width:6px;height:6px;border-radius:50%;background:${cor}"></div>
+            <div style="width:1px;flex:1;background:var(--color-border-tertiary)"></div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+              <span style="font-size:11px;font-weight:500;color:${cor}">${tipoLedgerLabel(e.tipo)}</span>
+              <span class="mono" style="font-size:9px;color:var(--color-text-tertiary)">${e.ts}</span>
+              <span class="mono" style="font-size:9px;color:${integroColor};margin-left:auto">${integroIcon}</span>
+            </div>
+            <div style="font-size:10px;color:var(--color-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${detalhe}</div>
+            <div class="mono" style="font-size:8px;color:var(--color-text-tertiary);margin-top:2px">blk:${e.id} hash:${e.hash} prev:${e.hashAnterior}</div>
+          </div>
+        </div>`;
+      }).join("")}
+  </div>
+
+  ${STATE.wsStatus==="connected"?`<div style="margin-top:8px;padding:8px;background:var(--color-background-success);border:0.5px solid var(--color-border-success);border-radius:var(--border-radius-md);font-size:11px;color:var(--color-text-success)">
+    🔗 Conectado ao sistema real — botões "Fabric Real" consultam o Hyperledger diretamente.
+    <button onclick="STATE.auditFiltroEmpresa!=='TODAS'&&chamarFabric({tipo:'GET_AUDITORIA',empresa:STATE.auditFiltroEmpresa})" style="margin-left:8px;font-size:10px;padding:2px 8px;color:var(--color-text-success)">Ver Auditoria Completa no Fabric</button>
+  </div>`:""}
+  `;
+}
+
+// ─── renderTabContent ──────────────────────────────────────────────────────
 function renderTabContent() {
   const f=STATE.injectForm;
   const crit=TIPO_CRIT[f.tipo];
@@ -445,14 +795,15 @@ function renderTabContent() {
     <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Simule um sensor enviando um alerta para todas as bases. A base com maior prioridade responderá mais rápido.</p>
     <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Setor de ocorrência</label>
     <select onchange="STATE.injectForm.sector=this.value;render()" style="width:100%">
-      ${["S1","S2","S3","S4","S5","S6","S7","S8"].map(s=>`<option value="${s}" ${f.sector===s?"selected":""}>${s} — 1ª prioridade: ${PRIORITY_TABLE[s][0]}</option>`).join("")}
+      ${["S1","S2","S3","S4","S5","S6","S7","S8"].map(s=>`<option value="${s}" ${f.sector===s?"selected":""}>${s} — empresa: ${SECTOR_EMPRESA[s]} | 1ª prio: ${PRIORITY_TABLE[s][0]}</option>`).join("")}
     </select></div>
     <div style="margin-bottom:10px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Tipo de ocorrência</label>
     <select onchange="STATE.injectForm.tipo=this.value;render()" style="width:100%">
       ${TIPOS.map(t=>`<option value="${t}" ${f.tipo===t?"selected":""}>${t.replace(/_/g," ")} [${TIPO_CRIT[t]}]</option>`).join("")}
     </select></div>
     <div style="padding:10px;border-radius:var(--border-radius-md);background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);margin-bottom:10px;font-size:11px">
-      <div>Criticidade: <strong style="color:${c_crit(crit)}">${crit}</strong></div>
+      <div>Empresa pagante: <strong style="color:var(--color-text-info)">${SECTOR_EMPRESA[f.sector]}</strong> · Saldo: <strong style="color:${(STATE.carteiras[SECTOR_EMPRESA[f.sector]]??0)<CUSTO_POR_CRIT[crit]?"var(--color-text-danger)":"var(--color-text-success)"}">${STATE.carteiras[SECTOR_EMPRESA[f.sector]]??0}tk</strong></div>
+      <div style="margin-top:3px">Custo desta missão: <strong style="color:${c_crit(crit)}">${CUSTO_POR_CRIT[crit]} token(s)</strong> · Criticidade: <strong style="color:${c_crit(crit)}">${crit}</strong></div>
       <div style="margin-top:3px">Prioridade: <strong style="color:var(--color-text-success)">${prio[0]}</strong> &gt; ${prio[1]} &gt; ${prio[2]} &gt; ${prio[3]}</div>
       <div style="margin-top:3px">Timeouts: <span class="mono">0ms / 200ms / 400ms / 600ms</span></div>
     </div>
@@ -465,13 +816,13 @@ function renderTabContent() {
     </div>`;
 
   if(STATE.tab==="stress") return `
-    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Teste de carga: bombardeie o sistema com alertas simultâneos e observe a priorização, exclusão mútua e replanejamento.</p>
+    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Teste de carga: bombardeie o sistema com alertas simultâneos e observe a priorização, exclusão mútua e prevenção de duplo gasto.</p>
     <div style="margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"><span>Número de alertas</span><span class="mono" style="font-weight:500">${bc.count}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"><span>Número de alertas</span><span class="mono">${bc.count}</span></div>
       <input type="range" min="5" max="100" step="5" value="${bc.count}" ${STATE.bombarding?"disabled":""} oninput="STATE.bombCfg.count=+this.value;render()">
     </div>
     <div style="margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"><span>Taxa (alertas/s)</span><span class="mono" style="font-weight:500">${bc.rate}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"><span>Taxa (alertas/s)</span><span class="mono">${bc.rate}</span></div>
       <input type="range" min="1" max="20" step="1" value="${bc.rate}" ${STATE.bombarding?"disabled":""} oninput="STATE.bombCfg.rate=+this.value;render()">
     </div>
     <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Setores alvo</label>
@@ -482,9 +833,9 @@ function renderTabContent() {
     <div style="margin-bottom:10px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Distribuição de criticidade</label>
     <select ${STATE.bombarding?"disabled":""} onchange="STATE.bombCfg.criticidade=this.value" style="width:100%">
       <option value="mixed" ${bc.criticidade==="mixed"?"selected":""}>Misto (20% CRITICA / 30% ALTA / 50% BAIXA)</option>
-      <option value="CRITICA" ${bc.criticidade==="CRITICA"?"selected":""}>Apenas CRITICA</option>
-      <option value="ALTA" ${bc.criticidade==="ALTA"?"selected":""}>Apenas ALTA</option>
-      <option value="BAIXA" ${bc.criticidade==="BAIXA"?"selected":""}>Apenas BAIXA</option>
+      <option value="CRITICA">Apenas CRITICA</option>
+      <option value="ALTA">Apenas ALTA</option>
+      <option value="BAIXA">Apenas BAIXA</option>
     </select></div>
     ${STATE.bombarding?`<div style="padding:10px;background:var(--color-background-warning);border:0.5px solid var(--color-border-warning);border-radius:var(--border-radius-md);margin-bottom:8px">
       <div class="mono" style="font-size:12px;color:var(--color-text-warning)">BOMBARDEANDO... ${STATE.bombSent}/${STATE.bombTotal}</div>
@@ -494,124 +845,93 @@ function renderTabContent() {
     </div>`:""}
     ${STATE.bombarding
       ?`<button onclick="stopBombard()" style="width:100%;padding:9px;font-weight:500;background:var(--color-background-danger);color:var(--color-text-danger);border-color:var(--color-border-danger)22">Parar Bombardeamento</button>`
-      :`<button onclick="startBombard()" style="width:100%;padding:9px;font-weight:500;background:var(--color-background-warning);color:var(--color-text-warning);border-color:var(--color-border-warning)22">Iniciar Bombardeamento</button>`}`;
+      :`<button onclick="startBombard()" style="width:100%;padding:9px;font-weight:500;background:var(--color-background-warning);color:var(--color-text-warning);border-color:var(--color-border-warning)22">Iniciar Bombardeamento</button>`}
+    <div style="margin-top:10px;padding:8px;background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);font-size:11px;color:var(--color-text-secondary)">
+      Empresas sem saldo terão requisições <span style="color:var(--color-text-danger)">REJEITADAS</span> automaticamente — observe na aba Auditoria.
+    </div>`;
 
   if(STATE.tab==="drone") return `
-    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Gerencie bases e drones. Derrubar uma base desativa todos os seus drones imediatamente.</p>
-
+    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Gerencie bases e drones.</p>
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--color-text-primary)">Bases de Operação</div>
     <div style="margin-bottom:14px">
       ${["NORTE","SUL","LESTE","OESTE"].map(base=>{
-        const online = STATE.bases[base];
-        const drs = STATE.drones.filter(d=>d.base===base);
-        const freeN = drs.filter(d=>d.state==="LIVRE").length;
-        const occN  = drs.filter(d=>d.state==="OCUPADO").length;
-        const lostN = drs.filter(d=>d.state==="PERDIDO").length;
+        const online=STATE.bases[base];
+        const drs=STATE.drones.filter(d=>d.base===base);
+        const fN=drs.filter(d=>d.state==="LIVRE").length;
+        const oN=drs.filter(d=>d.state==="OCUPADO").length;
+        const lN=drs.filter(d=>d.state==="PERDIDO").length;
         return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--border-radius-md);background:${online?"var(--color-background-primary)":"var(--color-background-danger)"};border:0.5px solid ${online?"var(--color-border-tertiary)":"var(--color-border-danger)"};margin-bottom:5px">
           <div style="display:flex;align-items:center;gap:8px">
             <div style="width:9px;height:9px;border-radius:50%;background:${online?"var(--color-text-success)":"var(--color-text-danger)"}"></div>
             <div>
               <div class="mono" style="font-size:12px;font-weight:500;color:var(--color-text-primary)">${base}</div>
-              <div style="font-size:10px;color:var(--color-text-secondary)">${online?`${freeN} livre · ${occN} ocup. · ${lostN} perd.`:"OFFLINE — todos os drones inativos"}</div>
+              <div style="font-size:10px;color:var(--color-text-secondary)">${online?`${fN} livre · ${oN} ocup. · ${lN} perd.`:"OFFLINE — todos os drones inativos"}</div>
             </div>
           </div>
           <div style="display:flex;gap:5px">
-            ${online
-              ? `<button onclick="killBase('${base}')" style="font-size:11px;padding:4px 10px;color:var(--color-text-danger);border-color:var(--color-border-danger)44">✕ Derrubar Base</button>`
-              : `<button onclick="reviveBase('${base}')" style="font-size:11px;padding:4px 10px;color:var(--color-text-success);border-color:var(--color-border-success)44">↺ Restaurar Base</button>`}
+            ${online?`<button onclick="killBase('${base}')" style="font-size:11px;padding:4px 10px;color:var(--color-text-danger);border-color:var(--color-border-danger)44">✕ Derrubar</button>`
+                    :`<button onclick="reviveBase('${base}')" style="font-size:11px;padding:4px 10px;color:var(--color-text-success);border-color:var(--color-border-success)44">↺ Restaurar</button>`}
           </div>
         </div>`;
       }).join("")}
     </div>
-
     <div style="border-top:0.5px solid var(--color-border-tertiary);padding-top:12px;margin-bottom:8px">
-      <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--color-text-primary)">Adicionar Drone</div>
-      <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">ID do Drone</label>
-      <input type="text" placeholder="Ex: DRONE-NORTE-2" value="${nd.id}" oninput="STATE.newDrone.id=this.value"></div>
-      <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Base de Origem</label>
-      <select onchange="STATE.newDrone.base=this.value" style="width:100%">
-        ${["NORTE","SUL","LESTE","OESTE"].map(b=>`<option value="${b}" ${nd.base===b?"selected":""}>${b}${!STATE.bases[b]?" (OFFLINE)":""}</option>`).join("")}
-      </select></div>
-      <div style="margin-bottom:10px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Porta TCP</label>
-      <input type="number" value="${nd.port}" oninput="STATE.newDrone.port=+this.value"></div>
-      <button onclick="addDrone()" ${!nd.id.trim()?"disabled":""} style="width:100%;padding:9px;font-weight:500;background:var(--color-background-success);color:var(--color-text-success);border-color:var(--color-border-success)22;margin-bottom:12px">
-        Adicionar Drone ao Sistema
-      </button>
+      <div style="font-size:12px;font-weight:500;margin-bottom:8px">Adicionar Drone</div>
+      <div style="margin-bottom:6px"><input type="text" placeholder="Ex: DRONE-NORTE-2" value="${nd.id}" oninput="STATE.newDrone.id=this.value"></div>
+      <div style="display:grid;grid-template-columns:1fr 80px;gap:6px;margin-bottom:8px">
+        <select onchange="STATE.newDrone.base=this.value">
+          ${["NORTE","SUL","LESTE","OESTE"].map(b=>`<option value="${b}" ${nd.base===b?"selected":""}>${b}${!STATE.bases[b]?" (OFF)":""}</option>`).join("")}
+        </select>
+        <input type="number" value="${nd.port}" oninput="STATE.newDrone.port=+this.value" placeholder="Porta">
+      </div>
+      <button onclick="addDrone()" ${!nd.id.trim()?"disabled":""} style="width:100%;padding:8px;font-weight:500;background:var(--color-background-success);color:var(--color-text-success);border-color:var(--color-border-success)22">Adicionar Drone</button>
     </div>
-
-    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--color-text-primary)">Drones ativos</div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px">Drones ativos</div>
     ${STATE.drones.map(d=>{
-      const baseOn = STATE.bases[d.base];
+      const bOn=STATE.bases[d.base];
       return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:0.5px solid var(--color-border-tertiary)">
-        <div>
-          <div class="mono" style="font-size:11px;color:var(--color-text-primary)">${d.id.replace("DRONE-","")}</div>
-          <div style="font-size:10px;color:${c_state(d.state)}">${d.state}${!baseOn?' <span style="color:var(--color-text-danger)">(base offline)</span>':''}</div>
-        </div>
+        <div><div class="mono" style="font-size:11px;color:var(--color-text-primary)">${d.id.replace("DRONE-","")}</div>
+        <div style="font-size:10px;color:${c_state(d.state)}">${d.state}${!bOn?" (base offline)":""}</div></div>
         <div style="display:flex;gap:6px">
-          ${d.state==="PERDIDO"&&baseOn?`<button onclick="reviveDrone('${d.id}')" style="font-size:11px;color:var(--color-text-success)">Reconectar</button>`:""}
-          ${d.state==="LIVRE"&&baseOn?`<button onclick="killDrone('${d.id}')" style="font-size:11px;color:var(--color-text-danger)">Derrubar</button>`:""}
+          ${d.state==="PERDIDO"&&bOn?`<button onclick="reviveDrone('${d.id}')" style="font-size:11px;color:var(--color-text-success)">Reconectar</button>`:""}
+          ${d.state==="LIVRE"&&bOn?`<button onclick="killDrone('${d.id}')" style="font-size:11px;color:var(--color-text-danger)">Derrubar</button>`:""}
           ${d.state!=="OCUPADO"?`<button onclick="removeDrone('${d.id}')" style="font-size:11px">Remover</button>`:""}
-          ${d.state==="OCUPADO"?`<span style="font-size:11px;color:var(--color-text-warning)">Em missao</span>`:""}
+          ${d.state==="OCUPADO"?`<span style="font-size:11px;color:var(--color-text-warning)">Em missão</span>`:""}
         </div>
       </div>`;
     }).join("")}`;
 
+  if(STATE.tab==="audit") return renderAuditoria();
+
   if(STATE.tab==="bridge") return `
-    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Conecte este painel ao sistema Python real. O broker já envia eventos UDP para a porta 8000 via <span class="mono">notificar_monitor()</span>.</p>
+    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Conecte ao sistema Python real. O broker envia eventos UDP na porta 8000 via <span class="mono">notificar_monitor()</span>. A bridge bidirecional também encaminha chamadas ao Hyperledger Fabric.</p>
     <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">URL WebSocket</label>
     <input type="text" value="${STATE.wsUrl}" oninput="STATE.wsUrl=this.value"></div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
       <div style="width:8px;height:8px;border-radius:50%;background:${STATE.wsStatus==="connected"?"var(--color-text-success)":STATE.wsStatus==="error"?"var(--color-text-danger)":"var(--color-text-tertiary)"}"></div>
-      <span style="font-size:12px;color:var(--color-text-secondary)">${STATE.wsStatus==="connected"?"Conectado ao sistema real":STATE.wsStatus==="error"?"Erro de conexao":"Modo simulacao"}</span>
+      <span style="font-size:12px;color:var(--color-text-secondary)">${STATE.wsStatus==="connected"?"Conectado ao sistema real":STATE.wsStatus==="error"?"Erro de conexão":"Modo simulação"}</span>
     </div>
     <button onclick="${STATE.wsStatus==="connected"?"STATE.wsObj&&STATE.wsObj.close()":"connectWs()"}" style="width:100%;padding:9px;font-weight:500;margin-bottom:12px;background:${STATE.wsStatus==="connected"?"var(--color-background-danger)":"var(--color-background-success)"};color:${STATE.wsStatus==="connected"?"var(--color-text-danger)":"var(--color-text-success)"};border-color:transparent">
       ${STATE.wsStatus==="connected"?"Desconectar":"Conectar ao Sistema Real"}
     </button>
-    <div style="font-size:12px;font-weight:500;margin-bottom:6px">monitor_bridge.py — execute no PC do monitor:</div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:6px">monitor_bridge.py (versão bidirecional com Fabric):</div>
     <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px">
-<pre>import asyncio, websockets, socket, json
+<pre># Execute: python monitor/monitor_bridge.py
+# Requer: pip install websockets
+# A versão bidirecional encaminha chamadas
+# GET_SALDO / GET_AUDITORIA / TRANSFERIR
+# direto para o Hyperledger Fabric via ledger_client.py</pre></div>`;
 
-async def main():
-    clients = set()
-    sock = socket.socket(
-        socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", 8000))
-    sock.setblocking(False)
-
-    async def ws_handler(ws):
-        clients.add(ws)
-        try:
-            async for _ in ws: pass
-        finally: clients.discard(ws)
-
-    async def udp_loop():
-        loop = asyncio.get_event_loop()
-        while True:
-            data = await loop.sock_recv(
-                sock, 4096)
-            evt = json.loads(data)
-            for ws in set(clients):
-                try: await ws.send(
-                    json.dumps(evt))
-                except: clients.discard(ws)
-
-    srv = await websockets.serve(
-        ws_handler, "0.0.0.0", 8001)
-    print("Bridge UDP:8000 -> WS:8001")
-    await asyncio.gather(
-        srv.wait_closed(), udp_loop())
-
-asyncio.run(main())
-# pip install websockets</pre></div>`;
   return "";
 }
 
+// ─── RENDER principal ──────────────────────────────────────────────────────
 function render() {
   const S=STATE;
   S.lamport=lamportClock;
 
   const qSorted=[...S.queue].sort((a,b)=>{
-    const ord={PENDENTE:0,ACEITA:1,CONCLUIDA:2};
+    const ord={PENDENTE:0,ACEITA:1,CONCLUIDA:2,REJEITADA:3};
     if(ord[a.status]!==ord[b.status]) return ord[a.status]-ord[b.status];
     return (CRIT_PESO[b.crit]||1)-(CRIT_PESO[a.crit]||1);
   }).slice(0,30);
@@ -620,16 +940,24 @@ function render() {
   const actN=S.queue.filter(r=>r.status==="ACEITA").length;
   const freeN=S.drones.filter(d=>d.state==="LIVRE"&&S.bases[d.base]).length;
   const onlineBases=Object.values(S.bases).filter(Boolean).length;
+  const blocos=S.ledger.length;
+  const adulterados=S.ledger.filter(e=>e.integro===false).length;
+  const integridadeColor=S.ledgerOk===null?"var(--color-text-warning)":S.ledgerOk?"var(--color-text-success)":"var(--color-text-danger)";
 
-  const tabs=[{k:"inject",l:"Injetar Alerta"},{k:"stress",l:"Stress Test"},{k:"drone",l:"Drones & Bases"},{k:"bridge",l:"Bridge"}];
+  // 5 abas agora
+  const tabs=[
+    {k:"inject",l:"Injetar Alerta"},
+    {k:"stress",l:"Stress Test"},
+    {k:"drone",l:"Drones & Bases"},
+    {k:"audit",l:"📊 Auditoria"},
+    {k:"bridge",l:"Bridge"}
+  ];
 
   document.getElementById("app").innerHTML = `
-  <h2 style="sr-only">Ormuz Command Center — sistema distribuído de monitoramento marítimo</h2>
-
   <div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 0 14px;border-bottom:0.5px solid var(--color-border-tertiary);margin-bottom:14px;flex-wrap:wrap;gap:8px">
     <div>
       <div class="mono" style="font-size:17px;font-weight:500;color:var(--color-text-primary)">ORMUZ COMMAND CENTER</div>
-      <div style="font-size:11px;color:var(--color-text-secondary);margin-top:2px">Infraestrutura distribuída — monitoramento marítimo do Estreito de Ormuz</div>
+      <div style="font-size:11px;color:var(--color-text-secondary);margin-top:2px">Infraestrutura distribuída — monitoramento marítimo + economia em blockchain</div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       ${[
@@ -637,8 +965,9 @@ function render() {
         {l:"ALERTAS",v:S.stats.total,c:"var(--color-text-primary)"},
         {l:"ACEITAS",v:S.stats.aceitas,c:"var(--color-text-info)"},
         {l:"CONCLUÍDAS",v:S.stats.concluidas,c:"var(--color-text-success)"},
-        {l:"PERDIDOS",v:S.stats.perdidos,c:"var(--color-text-danger)"},
+        {l:"REJEITADAS",v:S.stats.rejeitados,c:"var(--color-text-danger)"},
         {l:"BASES OK",v:`${onlineBases}/4`,c:onlineBases===4?"var(--color-text-success)":onlineBases===0?"var(--color-text-danger)":"var(--color-text-warning)"},
+        {l:"BLOCOS",v:blocos,c:adulterados>0?"var(--color-text-danger)":integridadeColor},
       ].map(x=>`<div style="background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:5px 10px;text-align:center;min-width:60px">
         <div style="font-size:9px;color:var(--color-text-tertiary);margin-bottom:2px">${x.l}</div>
         <div class="mono" style="font-size:18px;font-weight:500;color:${x.c};line-height:1">${x.v}</div>
@@ -652,6 +981,7 @@ function render() {
 
   <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1fr);gap:12px">
 
+    <!-- Coluna 1: mapa + drones + tabela de prioridades -->
     <div style="display:flex;flex-direction:column;gap:10px">
 
       <div class="card">
@@ -663,18 +993,13 @@ function render() {
           </div>
         </div>
         ${renderMap()}
-        <div style="margin-top:6px;display:flex;gap:8px;font-size:10px;color:var(--color-text-tertiary)">
-          <span>▲ drones</span>
-          <span style="color:var(--color-text-success)">verde=LIVRE</span>
-          <span style="color:var(--color-text-warning)">laranja=OCUP.</span>
-          <span style="color:var(--color-text-danger)">verm.=PERD./OFFLINE</span>
-        </div>
+        <div style="margin-top:4px;font-size:9px;color:var(--color-text-tertiary)">Saldo em tokens exibido em cada setor · ▲ = drones</div>
       </div>
 
       <div class="card">
         <div style="font-size:13px;font-weight:500;margin-bottom:8px">
           Frota de Drones
-          <span style="font-size:11px;font-weight:400;color:var(--color-text-secondary);margin-left:6px">${freeN} livres (bases online) / ${S.drones.length} total</span>
+          <span style="font-size:11px;font-weight:400;color:var(--color-text-secondary);margin-left:6px">${freeN} livres / ${S.drones.length} total</span>
         </div>
         ${S.drones.map(renderDroneCard).join("")}
       </div>
@@ -689,15 +1014,15 @@ function render() {
       </div>
     </div>
 
+    <!-- Coluna 2: fila + log de eventos -->
     <div style="display:flex;flex-direction:column;gap:10px">
-
       <div class="card" style="flex:none">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <span style="font-size:13px;font-weight:500">Fila Distribuída Replicada</span>
           <button onclick="STATE.queue=[];render()" style="font-size:11px;padding:3px 8px">Limpar</button>
         </div>
         <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px">
-          Ordenada por: criticidade (CRITICA>ALTA>BAIXA) → timestamp Lamport → setor
+          Ordem: criticidade (CRITICA→ALTA→BAIXA) → timestamp Lamport → setor
         </div>
         <div class="scroll" style="max-height:260px">
           ${qSorted.length===0
@@ -711,8 +1036,8 @@ function render() {
           <span style="font-size:13px;font-weight:500">Log de Eventos</span>
           <button onclick="STATE.events=[];render()" style="font-size:11px;padding:3px 8px">Limpar</button>
         </div>
-        <div class="scroll mono" style="max-height:300px;font-size:10px;line-height:1.7">
-          ${S.events.slice(0,60).map(ev=>`<div style="display:flex;gap:8px;padding:1px 0;border-bottom:0.5px solid var(--color-border-tertiary)22">
+        <div class="scroll mono" style="max-height:320px;font-size:10px;line-height:1.7">
+          ${S.events.slice(0,80).map(ev=>`<div style="display:flex;gap:8px;padding:1px 0;border-bottom:0.5px solid var(--color-border-tertiary)22">
             <span style="color:var(--color-text-tertiary);flex-shrink:0">${ev.ts}</span>
             <span style="color:${c_log(ev.level)}">${ev.msg}</span>
           </div>`).join("")}
@@ -721,10 +1046,11 @@ function render() {
       </div>
     </div>
 
+    <!-- Coluna 3: painel de controle com 5 abas -->
     <div style="display:flex;flex-direction:column;gap:10px">
       <div class="card">
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);margin:-12px -12px 12px;border-bottom:0.5px solid var(--color-border-tertiary)">
-          ${tabs.map(t=>`<button onclick="STATE.tab='${t.k}';render()" style="padding:9px 4px;font-size:11px;font-weight:${S.tab===t.k?500:400};background:${S.tab===t.k?"var(--color-background-primary)":"transparent"};border:none;border-radius:0;border-bottom:${S.tab===t.k?"2px solid var(--color-text-info)":"2px solid transparent"};color:${S.tab===t.k?"var(--color-text-primary)":"var(--color-text-secondary)"};cursor:pointer;transition:all 0.15s">${t.l}</button>`).join("")}
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);margin:-12px -12px 12px;border-bottom:0.5px solid var(--color-border-tertiary)">
+          ${tabs.map(t=>`<button onclick="STATE.tab='${t.k}';render()" style="padding:8px 2px;font-size:10px;font-weight:${S.tab===t.k?500:400};background:${S.tab===t.k?"var(--color-background-primary)":"transparent"};border:none;border-radius:0;border-bottom:${S.tab===t.k?"2px solid var(--color-text-info)":"2px solid transparent"};color:${S.tab===t.k?"var(--color-text-primary)":"var(--color-text-secondary)"};cursor:pointer;transition:all 0.15s">${t.l}</button>`).join("")}
         </div>
         ${renderTabContent()}
       </div>
@@ -732,7 +1058,7 @@ function render() {
   </div>`;
 }
 
-// Expose functions globally for onclick handlers
+// Expõe globalmente para os handlers onclick
 window.STATE=STATE;
 window.render=render;
 window.injectAlert=injectAlert;
@@ -744,15 +1070,30 @@ window.reviveDrone=reviveDrone;
 window.removeDrone=removeDrone;
 window.connectWs=connectWs;
 window.processQueue=processQueue;
-// ── NOVO: exportar funções de base
 window.killBase=killBase;
 window.reviveBase=reviveBase;
+window.transferirTokens=transferirTokens;
+window.recarregarCarteiras=recarregarCarteiras;
+window.verificarIntegridadeLedger=verificarIntegridadeLedger;
+window.simularAdulteracaoLedger=simularAdulteracaoLedger;
+window.chamarFabric=chamarFabric;
+window.EMPRESAS=EMPRESAS;
 
 // INIT
 log("Sistema ORMUZ COMMAND CENTER iniciado","success");
 log("4 bases ativas: NORTE, SUL, LESTE, OESTE","info");
 log("4 drones registrados e prontos","info");
-log("Modo Simulacao automatica ativo — gerando alertas a cada ~4.5s","info");
+log("8 carteiras de empresas criadas — 200 tokens cada","info");
+log("Ledger Hyperledger Fabric simulado — aba 📊 Auditoria disponível","info");
+log("Modo simulação automática ativo — gerando alertas a cada ~4.5s","info");
+
+// Bloco gênese do ledger
+registrarLedger("GENESE", {
+  empresa:"CONSORCIO",
+  valor: SALDO_INICIAL_EMPRESA,
+  motivo:`Inicialização: ${EMPRESAS.length} carteiras criadas com ${SALDO_INICIAL_EMPRESA} tokens cada`
+});
+
 render();
 startAutoSim();
 })();

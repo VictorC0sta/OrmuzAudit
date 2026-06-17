@@ -20,6 +20,7 @@ import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
 
+# pylint: disable=import-error, wrong-import-position
 from ledger_client import ledger as ledger_client
 from protocolo import notificar_monitor, criar_servidor_tcp, tcp_receber_completo, tcp_broadcast
 from constantes import TipoMensagem
