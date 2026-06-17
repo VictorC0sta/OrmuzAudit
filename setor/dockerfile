@@ -7,9 +7,14 @@ ENV PYTHONPATH="/app/shared"
 
 # 1. Copia a pasta shared
 COPY shared/ ./shared/
+# 2. Copia a pasta config
+COPY config/ ./config/
 
-# 2. Copia TODOS os arquivos da pasta setor
+# 3. Instala as dependências
+COPY fabric/connection-profile.json ./fabric/connection-profile.json
+
+# 4. Copia TODOS os arquivos da pasta setor
 COPY setor/ .
 
-# 3. Inicia o broker
+# 5. Inicia o broker
 CMD ["python", "broker_setor.py"]

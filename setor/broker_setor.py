@@ -165,12 +165,27 @@ def processar_alerta(msg: dict):
         ts,
     )
 
-    # ── CORRIGIDO: removido id_transacao= (kwarg inexistente) ──
+    # CORRIGIDO: ledger_client.debitar() retorna uma TUPLA (sucesso, motivo).
+    # A versão anterior fazia "ok = ledger_client.debitar(...)" e depois
+    # "if not ok:" — como uma tupla de 2 elementos é sempre truthy em Python
+    # (mesmo contendo False), essa checagem nunca disparava, e a requisição
+    # era sempre encaminhada às bases mesmo com saldo insuficiente ou ledger
+    # offline. Agora desempacotamos os dois valores corretamente.
     empresa_id = msg.get("empresa_id")
     custo = calcular_custo(msg.get("criticidade"))
-    ok = ledger_client.debitar(empresa_id, custo, requisicao.id_requisicao)
-    if not ok:
-        logger.warning("[%s] Empresa %s sem saldo suficiente. Requisição rejeitada.", SETOR_ID, empresa_id)
+    sucesso, motivo = ledger_client.debitar(empresa_id, custo, requisicao.id_requisicao)
+    if not sucesso:
+        logger.warning(
+            "[%s] Requisição %s REJEITADA para empresa %s — motivo: %s",
+            SETOR_ID, requisicao.id_requisicao[:8], empresa_id, motivo,
+        )
+        notificar_monitor({
+            "tipo": "PAGAMENTO_RECUSADO",
+            "setor": SETOR_ID,
+            "empresa": empresa_id,
+            "motivo": motivo,
+            "id_requisicao": requisicao.id_requisicao,
+        })
         return
 
     broadcast_com_retry(payload)

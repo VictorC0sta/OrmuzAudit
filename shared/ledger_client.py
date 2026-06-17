@@ -11,12 +11,13 @@ Instalação:
     pip install fabric-sdk-py
 """
 
+import asyncio
 import json
 import logging
 import os
-import time
 import threading
-from typing import Optional, Tuple, List, Dict, Any
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("ledger_client")
 
@@ -28,11 +29,16 @@ CONNECTION_PROFILE = os.environ.get(
     os.path.join(os.path.dirname(__file__), "..", "fabric", "connection-profile.json"),
 )
 
-# Organização e usuário que assina as transações neste nó
-ORG_NAME    = os.environ.get("FABRIC_ORG",      "OrgNorte")   # OrgNorte/OrgSul/OrgLeste/OrgOeste
-USER_NAME   = os.environ.get("FABRIC_USER",     "Admin")
-CHANNEL     = os.environ.get("FABRIC_CHANNEL",  "ormuz-channel")
+# Domínio da organização e usuário que assina as transações neste nó.
+# Deve bater com uma chave dentro de "organizations" no connection-profile.json
+# (ex.: "norte.ormuz.com" para a base NORTE / OrgNorte).
+ORG_DOMAIN  = os.environ.get("FABRIC_ORG_DOMAIN", "norte.ormuz.com")
+USER_NAME   = os.environ.get("FABRIC_USER",      "Admin")
+CHANNEL     = os.environ.get("FABRIC_CHANNEL",   "ormuz-channel")
 CHAINCODE   = os.environ.get("FABRIC_CHAINCODE", "token_contract")
+
+# Peers que devem endossar/responder as transações deste cliente
+FABRIC_PEERS = os.environ.get("FABRIC_PEERS", "peer0.norte.ormuz.com").split(",")
 
 # Nome da Private Data Collection definida em chaincode/collections_config.json
 PDC_PREFIX  = os.environ.get("FABRIC_PDC_PREFIX", "_implicit_org_")
@@ -45,13 +51,12 @@ class LedgerClient:
     Cliente do Hyperledger Fabric para o sistema Ormuz.
 
     Responsabilidades:
-        - Gerenciar a conexão com o gateway Fabric (inicialização lazy e thread-safe).
+        - Gerenciar a conexão com o Fabric (inicialização lazy e thread-safe).
         - Expor operações de negócio simples para broker_setor.py e base/broker.py.
-        - Separar transações de escrita (submit) de leituras (evaluate).
+        - Separar transações de escrita (invoke) de leituras (query).
         - Tratar erros de rede sem propagar exceções Fabric para o restante do sistema.
     """
 
-    # Constantes com os nomes exatos das funções no Chaincode (Solidity/Go/Node)
     CC_FN_DEBITAR = "DebitarTokens"
     CC_FN_SALDO = "ConsultarSaldo"
     CC_FN_REGISTRAR_CONCLUSAO = "RegistrarConclusao"
@@ -59,45 +64,41 @@ class LedgerClient:
     CC_FN_CRIAR_CARTEIRA = "CriarCarteira"
 
     def __init__(self):
-        self._gateway  = None   # hfc.Gateway
-        self._network  = None   # channel
-        self._contract = None   # chaincode handle
+        self._client = None     # hfc.fabric.Client
+        self._requestor = None  # identidade (User) usada para assinar as transações
         self._conectado = False
-        self._lock = threading.Lock() # Garante thread-safety na inicialização lazy
+        self._lock = threading.Lock()  # Garante thread-safety na inicialização lazy
 
     # ── Conexão ───────────────────────────────────────────────────────────────
 
     def _conectar(self) -> bool:
         """
-        Inicializa a conexão com o gateway Fabric usando double-checked locking
+        Inicializa a conexão com o Fabric usando double-checked locking
         para evitar que múltiplas threads tentem conectar simultaneamente.
         """
         if self._conectado:
             return True
 
         with self._lock:
-            # Checagem secundária após adquirir o lock
             if self._conectado:
                 return True
 
             try:
                 try:
-                    import hfc.fabric as hfc  # type: ignore
-                except ImportError as ie:
+                    from hfc.fabric import Client as FabricClient  # type: ignore
+                except ImportError:
                     logger.error("[LedgerClient] Falha ao importar fabric-sdk-py. Execute: pip install fabric-sdk-py")
                     return False
 
-                with open(CONNECTION_PROFILE, "r", encoding="utf-8") as f:
-                    profile = json.load(f)
+                if not os.path.exists(CONNECTION_PROFILE):
+                    raise FileNotFoundError(CONNECTION_PROFILE)
 
-                self._gateway = hfc.Client.new_with_crypto_suite(profile)
-                self._gateway.new_channel(CHANNEL)
-                self._network  = self._gateway.get_channel(CHANNEL)
-                self._contract = self._network.get_contract(CHAINCODE)
+                self._client = FabricClient(net_profile=CONNECTION_PROFILE)
+                self._requestor = self._client.get_user(org_name=ORG_DOMAIN, name=USER_NAME)
 
                 self._conectado = True
                 logger.info("[LedgerClient] Conectado ao Fabric | org=%s user=%s channel=%s cc=%s",
-                            ORG_NAME, USER_NAME, CHANNEL, CHAINCODE)
+                            ORG_DOMAIN, USER_NAME, CHANNEL, CHAINCODE)
                 return True
 
             except FileNotFoundError:
@@ -111,17 +112,47 @@ class LedgerClient:
     def _reconectar_se_necessario(self) -> bool:
         """Tenta reconectar se a conexão anterior caiu."""
         if not self._conectado:
-            self._gateway  = None
-            self._network  = None
-            self._contract = None
+            self._client = None
+            self._requestor = None
             return self._conectar()
         return True
 
     def desconectar(self):
-        """Fecha a conexão com o Fabric graciosamente (Graceful shutdown)."""
-        if self._conectado and hasattr(self, '_gateway'):
+        """Marca a conexão como encerrada (graceful shutdown)."""
+        if self._conectado:
             logger.info("[LedgerClient] Desconectando do Fabric...")
             self._conectado = False
+
+    # ── Helpers internos de invoke/query ────────────────────────────────────
+
+    def _invoke(self, fcn: str, args: List[str]) -> Optional[dict]:
+        """Submete uma transação de escrita ao chaincode e decodifica o retorno JSON."""
+        resposta = asyncio.run(self._client.chaincode_invoke(
+            requestor=self._requestor,
+            channel_name=CHANNEL,
+            peers=FABRIC_PEERS,
+            cc_name=CHAINCODE,
+            fcn=fcn,
+            args=args,
+            wait_for_event=True,
+        ))
+        if not resposta:
+            return None
+        return json.loads(resposta) if isinstance(resposta, str) else resposta
+
+    def _query(self, fcn: str, args: List[str]) -> Optional[dict]:
+        """Faz uma leitura (evaluate) sem submeter uma nova transação ao orderer."""
+        resposta = asyncio.run(self._client.chaincode_query(
+            requestor=self._requestor,
+            channel_name=CHANNEL,
+            peers=FABRIC_PEERS,
+            cc_name=CHAINCODE,
+            fcn=fcn,
+            args=args,
+        ))
+        if not resposta:
+            return None
+        return json.loads(resposta) if isinstance(resposta, str) else resposta
 
     # ── Operações financeiras — chamadas pelo broker_setor.py ─────────────────
 
@@ -138,13 +169,7 @@ class LedgerClient:
             return False, "LEDGER_OFFLINE"
 
         try:
-            resposta = self._contract.submit_transaction(
-                self.CC_FN_DEBITAR,
-                empresa_id,
-                str(valor),
-                id_requisicao,
-            )
-            resultado = json.loads(resposta) if resposta else {}
+            resultado = self._invoke(self.CC_FN_DEBITAR, [empresa_id, str(valor), id_requisicao]) or {}
             sucesso = resultado.get("sucesso", False)
             motivo = resultado.get("motivo", "OK" if sucesso else "saldo insuficiente")
 
@@ -164,14 +189,13 @@ class LedgerClient:
 
     def consultar_saldo(self, empresa_id: str) -> Optional[int]:
         """
-        Consulta o saldo atual de tokens de uma empresa usando leitura rápida (evaluate).
+        Consulta o saldo atual de tokens de uma empresa usando leitura rápida (query).
         """
         if not self._reconectar_se_necessario():
             return None
 
         try:
-            resposta = self._contract.evaluate_transaction(self.CC_FN_SALDO, empresa_id)
-            resultado = json.loads(resposta) if resposta else {}
+            resultado = self._query(self.CC_FN_SALDO, [empresa_id]) or {}
             saldo = resultado.get("saldo")
 
             logger.debug("[LedgerClient] Saldo | empresa=%s saldo=%s", empresa_id, saldo)
@@ -184,9 +208,22 @@ class LedgerClient:
 
     # ── Operações de auditoria — chamadas pelo base/broker.py ─────────────────
 
-    def registrar_conclusao(self, id_requisicao: str, drone_id: str, base_id: str, setor_id: str) -> Tuple[bool, str]:
+    def registrar_conclusao(
+        self,
+        id_requisicao: str,
+        drone_id: str,
+        base_id: str,
+        setor_id: str,
+    ) -> Tuple[bool, str]:
         """
         Registra no ledger que uma missão foi concluída com sucesso.
+
+        NOTA: o chaincode atual (RegistrarConclusao em token_contrato.go)
+        só persiste drone/base/setor/timestamp — não inclui o resultado da
+        missão (tipo de ocorrência, criticidade etc.). Isso é uma melhoria
+        separada no chaincode, fora do escopo desta correção de bugs de
+        demo; assim que o chaincode for estendido, basta acrescentar os
+        parâmetros aqui e na lista de args abaixo.
 
         Retorna:
             (Sucesso (bool), Motivo/Status (str))
@@ -197,15 +234,10 @@ class LedgerClient:
 
         try:
             timestamp = str(int(time.time()))
-            resposta = self._contract.submit_transaction(
+            resultado = self._invoke(
                 self.CC_FN_REGISTRAR_CONCLUSAO,
-                id_requisicao,
-                drone_id,
-                base_id,
-                setor_id,
-                timestamp,
-            )
-            resultado = json.loads(resposta) if resposta else {}
+                [id_requisicao, drone_id, base_id, setor_id, timestamp],
+            ) or {}
             sucesso = resultado.get("sucesso", False)
             motivo = resultado.get("motivo", "OK" if sucesso else "desconhecido")
 
@@ -225,23 +257,14 @@ class LedgerClient:
 
     def auditoria_empresa(self, empresa_id: str) -> List[Dict[str, Any]]:
         """
-        Retorna o histórico completo de transações de uma empresa via Private Data Collections.
+        Retorna o histórico completo de transações de uma empresa.
         """
         if not self._reconectar_se_necessario():
             return []
 
         try:
-            pdc_name = f"{PDC_PREFIX}{ORG_NAME}"
-            resposta = self._contract.evaluate_transaction(
-                self.CC_FN_AUDITORIA,
-                empresa_id,
-                pdc_name,
-            )
-
-            if not resposta:
-                return []
-
-            resultado = json.loads(resposta)
+            pdc_name = f"{PDC_PREFIX}{ORG_DOMAIN}"
+            resultado = self._query(self.CC_FN_AUDITORIA, [empresa_id, pdc_name]) or {}
             transacoes = resultado.get("transacoes", [])
 
             logger.info("[LedgerClient] Auditoria | empresa=%s transacoes=%d", empresa_id, len(transacoes))
@@ -265,12 +288,7 @@ class LedgerClient:
             return False, "LEDGER_OFFLINE"
 
         try:
-            resposta = self._contract.submit_transaction(
-                self.CC_FN_CRIAR_CARTEIRA,
-                empresa_id,
-                str(saldo_inicial),
-            )
-            resultado = json.loads(resposta) if resposta else {}
+            resultado = self._invoke(self.CC_FN_CRIAR_CARTEIRA, [empresa_id, str(saldo_inicial)]) or {}
             sucesso = resultado.get("sucesso", False)
             motivo = resultado.get("motivo", "OK" if sucesso else "já existe")
 

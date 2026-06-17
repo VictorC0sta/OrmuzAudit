@@ -1,42 +1,244 @@
-# crypto-config.yaml
-# Gera os certificados criptográficos (MSP) para cada organização
-# Execute: cryptogen generate --config=./crypto-config.yaml
+# configtx.yaml
+# Define os perfis de canal usados pelo configtxgen (genesis block, channel tx
+# e anchor peer updates). Diferente do crypto-config.yaml (que só gera
+# certificados), este arquivo descreve a topologia lógica da rede: quem são
+# as organizações, como funciona o consenso Raft e quais políticas valem.
+#
+# Consumido por: fabric/setup.sh (via FABRIC_CFG_PATH apontando para fabric/)
+#   configtxgen -profile OrmuzOrdererGenesis -channelID system-channel -outputBlock ...
+#   configtxgen -profile OrmuzChannel -outputCreateChannelTx ...
+#   configtxgen -profile OrmuzChannel -outputAnchorPeersUpdate ... -asOrg <Nome>
 
-OrdererOrgs:
-  - Name: Orderer
-    Domain: ormuz.com
-    Specs:
-      - Hostname: orderer
+Organizations:
+    - &OrdererOrg
+        Name: OrdererOrg
+        ID: OrdererMSP
+        MSPDir: crypto-config/ordererOrganizations/ormuz.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrdererMSP.member')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrdererMSP.member')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrdererMSP.admin')"
+        # Endpoints dos 3 orderers do cluster Raft, usados para descoberta de serviço
+        OrdererEndpoints:
+            - orderer1.ormuz.com:7050
+            - orderer2.ormuz.com:8050
+            - orderer3.ormuz.com:9050
 
-PeerOrgs:
-  - Name: OrgNorte
-    Domain: norte.ormuz.com
-    EnableNodeOUs: true
-    Template:
-      Count: 1
-    Users:
-      Count: 1
+    # IMPORTANTE: "Name" aqui precisa ser exatamente "OrgNorte" / "OrgSul" /
+    # "OrgLeste" / "OrgOeste" (sem o sufixo MSP) porque fabric/setup.sh chama
+    # "configtxgen ... -asOrg "${ORG}"" usando esses mesmos nomes no loop
+    # `for ORG in OrgNorte OrgSul OrgLeste OrgOeste`. O ID (MSP ID real) é
+    # quem leva o sufixo "MSP" e precisa bater com CORE_PEER_LOCALMSPID no
+    # docker-compose.fabric.yml.
+    - &OrgNorte
+        Name: OrgNorte
+        ID: OrgNorteMSP
+        MSPDir: crypto-config/peerOrganizations/norte.ormuz.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrgNorteMSP.admin', 'OrgNorteMSP.peer', 'OrgNorteMSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrgNorteMSP.admin', 'OrgNorteMSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrgNorteMSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('OrgNorteMSP.peer')"
+        AnchorPeers:
+            - Host: peer0.norte.ormuz.com
+              Port: 7051
 
-  - Name: OrgSul
-    Domain: sul.ormuz.com
-    EnableNodeOUs: true
-    Template:
-      Count: 1
-    Users:
-      Count: 1
+    - &OrgSul
+        Name: OrgSul
+        ID: OrgSulMSP
+        MSPDir: crypto-config/peerOrganizations/sul.ormuz.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrgSulMSP.admin', 'OrgSulMSP.peer', 'OrgSulMSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrgSulMSP.admin', 'OrgSulMSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrgSulMSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('OrgSulMSP.peer')"
+        AnchorPeers:
+            - Host: peer0.sul.ormuz.com
+              Port: 8051
 
-  - Name: OrgLeste
-    Domain: leste.ormuz.com
-    EnableNodeOUs: true
-    Template:
-      Count: 1
-    Users:
-      Count: 1
+    - &OrgLeste
+        Name: OrgLeste
+        ID: OrgLesteMSP
+        MSPDir: crypto-config/peerOrganizations/leste.ormuz.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrgLesteMSP.admin', 'OrgLesteMSP.peer', 'OrgLesteMSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrgLesteMSP.admin', 'OrgLesteMSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrgLesteMSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('OrgLesteMSP.peer')"
+        AnchorPeers:
+            - Host: peer0.leste.ormuz.com
+              Port: 9051
 
-  - Name: OrgOeste
-    Domain: oeste.ormuz.com
-    EnableNodeOUs: true
-    Template:
-      Count: 1
-    Users:
-      Count: 1
+    - &OrgOeste
+        Name: OrgOeste
+        ID: OrgOesteMSP
+        MSPDir: crypto-config/peerOrganizations/oeste.ormuz.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrgOesteMSP.admin', 'OrgOesteMSP.peer', 'OrgOesteMSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrgOesteMSP.admin', 'OrgOesteMSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrgOesteMSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('OrgOesteMSP.peer')"
+        AnchorPeers:
+            - Host: peer0.oeste.ormuz.com
+              Port: 10051
+
+# Capabilities V2_0 em todos os níveis: são as flags mais conservadoras que
+# funcionam de forma garantida com as imagens fabric-orderer:2.5 e
+# fabric-peer:2.5 do docker-compose.fabric.yml. Se quiser recursos mais
+# novos de chaincode (ex.: alguns comportamentos específicos do Fabric 2.5),
+# pode trocar a Application para V2_5 — mas teste antes da arguição.
+Capabilities:
+    Channel: &ChannelCapabilities
+        V2_0: true
+    Orderer: &OrdererCapabilities
+        V2_0: true
+    Application: &ApplicationCapabilities
+        V2_0: true
+
+Application: &ApplicationDefaults
+    Organizations:
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+        LifecycleEndorsement:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Endorsement"
+        Endorsement:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Endorsement"
+    Capabilities:
+        <<: *ApplicationCapabilities
+
+# Cluster Raft com os 3 orderers — corresponde 1:1 ao docker-compose.fabric.yml
+Orderer: &OrdererDefaults
+    OrdererType: etcdraft
+    Addresses:
+        - orderer1.ormuz.com:7050
+        - orderer2.ormuz.com:8050
+        - orderer3.ormuz.com:9050
+    EtcdRaft:
+        Consenters:
+            - Host: orderer1.ormuz.com
+              Port: 7050
+              ClientTLSCert: crypto-config/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/server.crt
+              ServerTLSCert: crypto-config/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/server.crt
+            - Host: orderer2.ormuz.com
+              Port: 8050
+              ClientTLSCert: crypto-config/ordererOrganizations/ormuz.com/orderers/orderer2.ormuz.com/tls/server.crt
+              ServerTLSCert: crypto-config/ordererOrganizations/ormuz.com/orderers/orderer2.ormuz.com/tls/server.crt
+            - Host: orderer3.ormuz.com
+              Port: 9050
+              ClientTLSCert: crypto-config/ordererOrganizations/ormuz.com/orderers/orderer3.ormuz.com/tls/server.crt
+              ServerTLSCert: crypto-config/ordererOrganizations/ormuz.com/orderers/orderer3.ormuz.com/tls/server.crt
+    BatchTimeout: 2s
+    BatchSize:
+        MaxMessageCount: 10
+        AbsoluteMaxBytes: 99 MB
+        PreferredMaxBytes: 512 KB
+    Organizations:
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+        BlockValidation:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+
+Channel: &ChannelDefaults
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+    Capabilities:
+        <<: *ChannelCapabilities
+
+Profiles:
+
+    # Usado por: configtxgen -profile OrmuzOrdererGenesis -channelID system-channel -outputBlock genesis.block
+    OrmuzOrdererGenesis:
+        <<: *ChannelDefaults
+        Orderer:
+            <<: *OrdererDefaults
+            Organizations:
+                - *OrdererOrg
+            Capabilities:
+                <<: *OrdererCapabilities
+        Consortiums:
+            OrmuzConsortium:
+                Organizations:
+                    - *OrgNorte
+                    - *OrgSul
+                    - *OrgLeste
+                    - *OrgOeste
+
+    # Usado por: configtxgen -profile OrmuzChannel -outputCreateChannelTx ormuz-channel.tx
+    #        e: configtxgen -profile OrmuzChannel -outputAnchorPeersUpdate <Org>Anchors.tx -asOrg <Org>
+    OrmuzChannel:
+        Consortium: OrmuzConsortium
+        <<: *ChannelDefaults
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *OrgNorte
+                - *OrgSul
+                - *OrgLeste
+                - *OrgOeste
+            Capabilities:
+                <<: *ApplicationCapabilities

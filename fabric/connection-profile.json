@@ -14,7 +14,11 @@
 
   "channels": {
     "ormuz-channel": {
-      "orderers": ["orderer.ormuz.com"],
+      "orderers": [
+        "orderer1.ormuz.com",
+        "orderer2.ormuz.com",
+        "orderer3.ormuz.com"
+      ],
       "peers": {
         "peer0.norte.ormuz.com": {
           "endorsingPeer": true,
@@ -68,10 +72,33 @@
   },
 
   "orderers": {
-    "orderer.ormuz.com": {
-      "url": "grpc://orderer.ormuz.com:7050",
+    "orderer1.ormuz.com": {
+      "url": "grpcs://orderer1.ormuz.com:7050",
+      "tlsCACerts": {
+        "path": "crypto-config/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/ca.crt"
+      },
       "grpcOptions": {
-        "ssl-target-name-override": "orderer.ormuz.com",
+        "ssl-target-name-override": "orderer1.ormuz.com",
+        "grpc-max-send-message-length": -1
+      }
+    },
+    "orderer2.ormuz.com": {
+      "url": "grpcs://orderer2.ormuz.com:8050",
+      "tlsCACerts": {
+        "path": "crypto-config/ordererOrganizations/ormuz.com/orderers/orderer2.ormuz.com/tls/ca.crt"
+      },
+      "grpcOptions": {
+        "ssl-target-name-override": "orderer2.ormuz.com",
+        "grpc-max-send-message-length": -1
+      }
+    },
+    "orderer3.ormuz.com": {
+      "url": "grpcs://orderer3.ormuz.com:9050",
+      "tlsCACerts": {
+        "path": "crypto-config/ordererOrganizations/ormuz.com/orderers/orderer3.ormuz.com/tls/ca.crt"
+      },
+      "grpcOptions": {
+        "ssl-target-name-override": "orderer3.ormuz.com",
         "grpc-max-send-message-length": -1
       }
     }

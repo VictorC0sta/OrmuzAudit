@@ -1,0 +1,44 @@
+# crypto-config.yaml
+# Gera os certificados criptográficos (MSP) para cada organização
+# Execute: cryptogen generate --config=./crypto-config.yaml
+
+OrdererOrgs:
+  - Name: Orderer
+    Domain: ormuz.com
+    Specs:
+      - Hostname: orderer1
+      - Hostname: orderer2
+      - Hostname: orderer3
+
+PeerOrgs:
+  - Name: OrgNorte
+    Domain: norte.ormuz.com
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+    Users:
+      Count: 1
+
+  - Name: OrgSul
+    Domain: sul.ormuz.com
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+    Users:
+      Count: 1
+
+  - Name: OrgLeste
+    Domain: leste.ormuz.com
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+    Users:
+      Count: 1
+
+  - Name: OrgOeste
+    Domain: oeste.ormuz.com
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+    Users:
+      Count: 1

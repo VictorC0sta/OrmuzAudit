@@ -5,6 +5,12 @@ WORKDIR /app
 # Copia as pastas com os nomes corretos
 COPY shared/ ./shared/
 COPY config/ ./config/
+
+# CORRIGIDO: copia o connection profile do Fabric — ledger_client.py
+# resolve esse caminho relativo a si mesmo (shared/../fabric/...) e,
+# sem essa cópia, o ledger nunca era encontrado (ficava sempre OFFLINE).
+COPY fabric/connection-profile.json ./fabric/connection-profile.json
+
 COPY base/ ./base/
 
 # Entra na pasta renomeada
