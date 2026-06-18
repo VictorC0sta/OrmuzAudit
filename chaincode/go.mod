@@ -1,6 +1,6 @@
 module ormuz-chaincode
 
-go 1.25.7
+go 1.23
 
 require github.com/hyperledger/fabric-contract-api-go v1.2.2
 
