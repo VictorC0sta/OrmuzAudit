@@ -3,9 +3,16 @@ broker_setor.py — Componente Broker de Setor do sistema Ormuz Command Center.
 
 Papel na arquitetura:
     Atua como um roteador intermediário entre o Sensor do setor e as Bases.
-    Ele recebe os dados "brutos" do sensor, estampa um Timestamp Lógico (Lamport)
-    para garantir a ordenação dos eventos no sistema distribuído, e dispara
+    Ele recebe os dados "brutos" do sensor, VERIFICA a assinatura HMAC do
+    alerta (prova de que o empresa_id alegado é mesmo de quem mandou —
+    ver shared/auth.py), estampa um Timestamp Lógico (Lamport) para
+    garantir a ordenação dos eventos no sistema distribuído, e dispara
     essa requisição simultaneamente para todas as 4 bases.
+
+    A partir daqui (setor -> bases -> ledger), o empresa_id já passou pela
+    verificação de origem — não é assinado de novo em cada hop, porque essa
+    parte da rede é infraestrutura nossa, não entrada não confiável vinda
+    de fora.
 """
 
 import os
@@ -26,6 +33,7 @@ from protocolo import notificar_monitor, criar_servidor_tcp, tcp_receber_complet
 from constantes import TipoMensagem
 from mensagens import MensagemRequisicao
 from lamport import LamportClock
+from auth import verificar
 
 # ── Configuração de Logging ───────────────────────────────────────────────────
 
@@ -120,8 +128,30 @@ def processar_alerta(msg: dict):
         logger.warning("[%s] Mensagem ignorada — tipo inesperado: %s", SETOR_ID, tipo)
         return
 
-    ts = clock.incrementar()
     empresa_id = msg.get("empresa_id")
+
+    # ── VERIFICAÇÃO DE AUTENTICIDADE (HMAC) ──────────────────────────────
+    # Antes de qualquer outra coisa: este alerta realmente vem de quem diz
+    # ser? Se a assinatura não bater (empresa errada, segredo errado, ou
+    # qualquer campo alterado depois de assinado), rejeita aqui mesmo — o
+    # alerta nunca chega a virar uma cobrança no ledger.
+    if not verificar(
+        msg.get("setor_id", SETOR_ID), msg.get("tipo_ocorrencia"),
+        msg.get("criticidade"), empresa_id, msg.get("id_alerta"),
+        msg.get("assinatura"),
+    ):
+        logger.warning(
+            "[%s] Alerta REJEITADO — assinatura HMAC invalida (empresa_id=%s pode estar forjado)",
+            SETOR_ID, empresa_id,
+        )
+        notificar_monitor({
+            "tipo": "PAGAMENTO_RECUSADO", "setor": SETOR_ID, "empresa": empresa_id,
+            "motivo": "assinatura invalida — empresa_id nao autenticado",
+            "id_requisicao": msg.get("id_alerta", ""),
+        })
+        return
+
+    ts = clock.incrementar()
     custo = calcular_custo(msg.get("criticidade"))
 
     requisicao = MensagemRequisicao(
@@ -135,8 +165,8 @@ def processar_alerta(msg: dict):
     payload["empresa_id"] = empresa_id 
 
     logger.info(
-        "[%s] Alerta recebido → req %s | %s [%s] | Lamport=%d",
-        SETOR_ID, requisicao.id_requisicao[:8], requisicao.tipo_ocorrencia, requisicao.criticidade, ts,
+        "[%s] Alerta autenticado → req %s | %s [%s] | empresa=%s | Lamport=%d",
+        SETOR_ID, requisicao.id_requisicao[:8], requisicao.tipo_ocorrencia, requisicao.criticidade, empresa_id, ts,
     )
 
     # ── LOGICA DE PRÉ-FILTRAGEM COM FAIL-OPEN (DEGRADAÇÃO GRACIOSA) ──

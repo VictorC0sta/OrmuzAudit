@@ -6,6 +6,12 @@ Papel na arquitetura:
     Ele simula a detecção de anomalias marítimas em um setor específico do 
     Estreito de Ormuz. Opera de forma totalmente autônoma, gerando eventos
     aleatórios e enviando-os via TCP para o Broker do seu respectivo setor.
+
+    ATUALIZAÇÃO (autenticação): cada alerta agora é assinado com HMAC-SHA256
+    usando o segredo da empresa dona deste sensor (shared/auth.py). Isso
+    fecha a brecha em que "empresa_id" era só um campo de texto solto no
+    JSON — sem isso, qualquer um poderia mandar um alerta se passando por
+    outra empresa e fazer ELA pagar a missão.
 """
 
 import os 
@@ -22,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
 from constantes import TipoOcorrencia, CRITICIDADE_POR_TIPO
 from mensagens import MensagemAlerta
 from protocolo import tcp_enviar
+from auth import assinar
 
 # ── Configuração de Logging ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -86,12 +93,28 @@ def gerar_ocorrencia() -> MensagemAlerta:
 
 def enviar_alerta(alerta: MensagemAlerta) -> bool:
     """
-    Converte o objeto dataclass MensagemAlerta para um dicionário (JSON)
-    e envia ao broker do setor via TCP usando a função compartilhada.
-    
+    Converte o objeto dataclass MensagemAlerta para um dicionário (JSON),
+    ASSINA o payload com o segredo HMAC da empresa (prova de que este
+    sensor realmente representa essa empresa) e envia ao broker do setor
+    via TCP usando a função compartilhada.
+
     Retorna True se o envio for bem-sucedido, False caso contrário.
     """
     payload = asdict(alerta)
+
+    try:
+        payload["assinatura"] = assinar(
+            alerta.setor_id, alerta.tipo_ocorrencia, alerta.criticidade,
+            alerta.empresa_id, alerta.id_alerta,
+        )
+    except KeyError:
+        # Empresa sem segredo cadastrado em config/chaves_empresas.json —
+        # melhor não mandar um alerta que o broker vai rejeitar de qualquer
+        # forma, e deixar bem claro no log que é um erro de configuração.
+        logger.error("[%s] EMPRESA_ID '%s' nao tem segredo cadastrado em chaves_empresas.json — alerta NAO enviado.",
+                     SENSOR_ID, alerta.empresa_id)
+        return False
+
     sucesso = tcp_enviar(IP_BROKER_SETOR, PORTA_BROKER_SETOR, payload)
  
     if sucesso:
