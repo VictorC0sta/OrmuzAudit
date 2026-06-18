@@ -6,6 +6,21 @@
 
 ---
 
+## 📑 Índice / Sumário
+
+1. [Visão Geral do Sistema](#1-visão-geral-do-sistema)
+2. [Arquitetura em Duas Camadas (A Escolha do Design)](#2-arquitetura-em-duas-camadas-a-escolha-do-design)
+3. [Infraestrutura da Blockchain e Topologia da Rede](#3-infraestrutura-da-blockchain-e-topologia-da-rede)
+4. [Gestão Descentralizada de Ativos e Autenticação (A Gênese)](#4-gestão-descentralizada-de-ativos-e-autenticação-a-gênese)
+5. [Fluxo de Pagamento e Resolução Definitiva de Duplo Gasto](#5-fluxo-de-pagamento-e-resolução-definitiva-de-duplo-gasto)
+6. [Proteção Avançada contra Duplo Despacho (Race Conditions)](#6-proteção-avançada-contra-duplo-despacho-race-conditions)
+7. [Log de Operações Imutável e Auditabilidade Visual](#7-log-de-operações-imutável-e-auditabilidade-visual)
+8. [Estrutura de Pastas Atualizada](#8-estrutura-de-pastas-atualizada)
+9. [Guião Completo de Execução e Testes Práticos](#9-guião-completo-de-execução-e-testes-práticos)
+10. [Demonstrações de Defesa Essenciais (Gabarito do Barema)](#10-demonstrações-de-defesa-essenciais-gabarito-do-barema)
+
+---
+
 ## 1. Visão Geral do Sistema
 
 O sistema evoluiu de uma infraestrutura estritamente operacional para uma **arquitetura em duas camadas independentes**, projetada para resolver a falta de confiança mútua, a espionagem e a possibilidade de adulteração de logs entre nações concorrentes no Estreito de Ormuz.
