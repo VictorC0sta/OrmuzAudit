@@ -84,6 +84,8 @@ peer_exec() {
         CORE_PEER_LOCALMSPID="$MSP_ID" \
         CORE_PEER_CLIENTCONNTIMEOUT=300s \
         CORE_PEER_DELIVERYCLIENTCONNTIMEOUT=300s \
+        CORE_PEER_TLS_ENABLED=true \
+        CORE_PEER_TLS_ROOTCERT_FILE="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/${ORG}/peers/peer0.${ORG}/tls/ca.crt" \
         CORE_PEER_MSPCONFIGPATH="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/${ORG}/users/Admin@${ORG}/msp" \
     "$@"
 }
@@ -130,8 +132,11 @@ for DOMAIN in "${!PEERS[@]}"; do
   echo "  ✓ Chaincode instalado em peer0.${DOMAIN}"
 done
 
-PKG_ID=$(docker exec cli \
-  peer lifecycle chaincode queryinstalled \
+# Recuperando o Package ID com as variáveis TLS explícitas
+PKG_ID=$(docker exec \
+  -e CORE_PEER_TLS_ENABLED=true \
+  -e CORE_PEER_TLS_ROOTCERT_FILE="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/peers/peer0.norte.ormuz.com/tls/ca.crt" \
+  cli peer lifecycle chaincode queryinstalled \
   | grep "token_v1" | awk -F 'Package ID: ' '{print $2}' | awk -F ',' '{print $1}')
 echo "  Package ID: $PKG_ID"
 
@@ -152,6 +157,7 @@ for DOMAIN in "${!PEERS[@]}"; do
   echo "  ✓ ${MSP} aprovou o chaincode (Política: 2 de 4)"
 done
 
+# Commit final exigindo o ca.crt de todos os 4 peers
 peer_exec "norte.ormuz.com" "peer0.norte.ormuz.com:7051" "OrgNorteMSP" \
   peer lifecycle chaincode commit \
     -o orderer1.ormuz.com:7050 \
@@ -164,9 +170,13 @@ peer_exec "norte.ormuz.com" "peer0.norte.ormuz.com:7051" "OrgNorteMSP" \
     --tls true \
     --cafile "$ORDERER_CA" \
     --peerAddresses peer0.norte.ormuz.com:7051 \
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/peers/peer0.norte.ormuz.com/tls/ca.crt" \
     --peerAddresses peer0.sul.ormuz.com:8051 \
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/sul.ormuz.com/peers/peer0.sul.ormuz.com/tls/ca.crt" \
     --peerAddresses peer0.leste.ormuz.com:9051 \
-    --peerAddresses peer0.oeste.ormuz.com:10051
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/leste.ormuz.com/peers/peer0.leste.ormuz.com/tls/ca.crt" \
+    --peerAddresses peer0.oeste.ormuz.com:10051 \
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/oeste.ormuz.com/peers/peer0.oeste.ormuz.com/tls/ca.crt"
 echo "  ✓ Chaincode commitado no channel (Política: 2 de 4)"
 
 echo ""
