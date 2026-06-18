@@ -1,9 +1,3 @@
-# docker/docker-compose.fabric.yml
-# Sobe a rede Hyperledger Fabric:
-#   3 Orderers (cluster Raft) + 4 Peers (1 por organização) + CLI
-# Execute a partir da raiz do projeto:
-#   docker compose -f docker/docker-compose.fabric.yml up -d
-
 version: '3.8'
 
 networks:
@@ -20,8 +14,6 @@ volumes:
   peer0.oeste.ormuz.com:
 
 services:
-
-  # ── Orderer 1 (Raft) ─────────────────────────────────────────────────────
   orderer1.ormuz.com:
     image: hyperledger/fabric-orderer:2.5
     container_name: orderer1.ormuz.com
@@ -33,7 +25,6 @@ services:
       - ORDERER_GENERAL_BOOTSTRAPFILE=/var/hyperledger/orderer/orderer.genesis.block
       - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
       - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
-      # TLS é obrigatório: o cluster Raft conversa pela mesma porta gRPC
       - ORDERER_GENERAL_TLS_ENABLED=true
       - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
       - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
@@ -53,7 +44,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── Orderer 2 (Raft) ─────────────────────────────────────────────────────
   orderer2.ormuz.com:
     image: hyperledger/fabric-orderer:2.5
     container_name: orderer2.ormuz.com
@@ -84,7 +74,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── Orderer 3 (Raft) ─────────────────────────────────────────────────────
   orderer3.ormuz.com:
     image: hyperledger/fabric-orderer:2.5
     container_name: orderer3.ormuz.com
@@ -115,7 +104,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── Peer OrgNorte ──────────────────────────────────────────────────────────
   peer0.norte.ormuz.com:
     image: hyperledger/fabric-peer:2.5
     container_name: peer0.norte.ormuz.com
@@ -144,7 +132,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── Peer OrgSul ────────────────────────────────────────────────────────────
   peer0.sul.ormuz.com:
     image: hyperledger/fabric-peer:2.5
     container_name: peer0.sul.ormuz.com
@@ -173,7 +160,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── Peer OrgLeste ──────────────────────────────────────────────────────────
   peer0.leste.ormuz.com:
     image: hyperledger/fabric-peer:2.5
     container_name: peer0.leste.ormuz.com
@@ -202,7 +188,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── Peer OrgOeste ──────────────────────────────────────────────────────────
   peer0.oeste.ormuz.com:
     image: hyperledger/fabric-peer:2.5
     container_name: peer0.oeste.ormuz.com
@@ -231,7 +216,6 @@ services:
     networks:
       - ormuz_fabric
 
-  # ── CLI (ferramenta de linha de comando para administração) ────────────────
   cli:
     image: hyperledger/fabric-tools:2.5
     container_name: cli
@@ -246,14 +230,49 @@ services:
       - CORE_PEER_LOCALMSPID=OrgNorteMSP
       - CORE_PEER_TLS_ENABLED=false
       - CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/users/Admin@norte.ormuz.com/msp
-      # CA do orderer, usada pelos comandos com --cafile no setup.sh / init_ledger.sh
       - ORDERER_CA=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/ca.crt
     working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
     command: /bin/bash
     volumes:
-      - /var/run/docker.sock:/host/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
       - ../fabric/crypto-config:/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto
       - ../fabric/channel-artifacts:/opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts
-      - ../chaincode:/opt/gopath/src/github.com/hyperledger/fabric/peer/chaincode
+    networks:
+      - ormuz_fabric
+
+  # ── SERVIDORES CHAINCODE-AS-A-SERVICE (NOVO) ──────────────────────────────
+  ccaas.norte.ormuz.com:
+    build: ../chaincode
+    container_name: ccaas.norte.ormuz.com
+    environment:
+      - CHAINCODE_SERVER_ADDRESS=0.0.0.0:9999
+      - CHAINCODE_ID=${CHAINCODE_ID_NORTE:-}
+    networks:
+      - ormuz_fabric
+
+  ccaas.sul.ormuz.com:
+    build: ../chaincode
+    container_name: ccaas.sul.ormuz.com
+    environment:
+      - CHAINCODE_SERVER_ADDRESS=0.0.0.0:9999
+      - CHAINCODE_ID=${CHAINCODE_ID_SUL:-}
+    networks:
+      - ormuz_fabric
+
+  ccaas.leste.ormuz.com:
+    build: ../chaincode
+    container_name: ccaas.leste.ormuz.com
+    environment:
+      - CHAINCODE_SERVER_ADDRESS=0.0.0.0:9999
+      - CHAINCODE_ID=${CHAINCODE_ID_LESTE:-}
+    networks:
+      - ormuz_fabric
+
+  ccaas.oeste.ormuz.com:
+    build: ../chaincode
+    container_name: ccaas.oeste.ormuz.com
+    environment:
+      - CHAINCODE_SERVER_ADDRESS=0.0.0.0:9999
+      - CHAINCODE_ID=${CHAINCODE_ID_OESTE:-}
     networks:
       - ormuz_fabric
