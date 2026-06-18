@@ -47,9 +47,10 @@ type LaudoMissao struct {
 
 // RespostaTransacao padroniza os retornos lidos pelo ledger_client.py
 type RespostaTransacao struct {
-	Sucesso       bool   `json:"sucesso"`
-	Motivo        string `json:"motivo"`
-	SaldoRestante int    `json:"saldo_restante,omitempty"`
+	Sucesso          bool   `json:"sucesso"`
+	Motivo           string `json:"motivo"`
+	SaldoRestante    int    `json:"saldo_restante,omitempty"`
+	TransacaoInedita bool   `json:"transacao_inedita"` 
 }
 
 // HistoricoTransacao é usado para montar a resposta da auditoria
@@ -184,9 +185,13 @@ func (s *SmartContract) AutorizarPagamento(ctx contractapi.TransactionContextInt
 		return nil, fmt.Errorf("falha ao verificar o ledger: %v", err)
 	}
 	if pagamentoExistente != nil {
-		// Idempotência: já autorizado antes (ex.: redespacho após drone perdido).
-		// Não cobra de novo — apenas confirma que o pagamento já está garantido.
-		return &RespostaTransacao{Sucesso: true, Motivo: "pagamento ja autorizado anteriormente (idempotente)"}, nil
+		// Idempotência: já autorizado antes.
+		// A flag TransacaoInedita = false avisa o Python que o dinheiro já havia sido cobrado.
+		return &RespostaTransacao{
+			Sucesso:          true, 
+			Motivo:           "pagamento ja autorizado anteriormente (idempotente)",
+			TransacaoInedita: false, 
+		}, nil
 	}
 
 	custo, err := strconv.Atoi(custoStr)
@@ -206,11 +211,7 @@ func (s *SmartContract) AutorizarPagamento(ctx contractapi.TransactionContextInt
 		return &RespostaTransacao{Sucesso: false, Motivo: "saldo insuficiente para autorizar a missao"}, nil
 	}
 
-	// Débito imediato. Se duas requisições concorrentes da mesma empresa
-	// chegarem aqui ao mesmo tempo, o controle de versão do Fabric (MVCC)
-	// garante que apenas uma das transações que escrevem na mesma chave
-	// "idEmpresa" será validada no bloco — a outra é invalidada pelo próprio
-	// consenso, e não apenas pela lógica do chaincode.
+	// Débito imediato
 	carteira.Saldo -= custo
 	carteiraAtualizadaJSON, _ := json.Marshal(carteira)
 	if err := ctx.GetStub().PutState(idEmpresa, carteiraAtualizadaJSON); err != nil {
@@ -228,7 +229,12 @@ func (s *SmartContract) AutorizarPagamento(ctx contractapi.TransactionContextInt
 		return nil, fmt.Errorf("falha ao registrar autorizacao de pagamento: %v", err)
 	}
 
-	return &RespostaTransacao{Sucesso: true, Motivo: "OK", SaldoRestante: carteira.Saldo}, nil
+	return &RespostaTransacao{
+		Sucesso:          true, 
+		Motivo:           "OK", 
+		SaldoRestante:    carteira.Saldo,
+		TransacaoInedita: true, // A transação ocorreu exatamente agora
+	}, nil
 }
 
 // RegistrarLaudo grava o resultado da missão de forma imutável. Não move

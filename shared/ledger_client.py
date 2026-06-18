@@ -159,26 +159,27 @@ class LedgerClient:
 
     # ── Pagamento ANTES do despacho + Laudo imutável DEPOIS da missão ──────────
 
-    def autorizar_pagamento(self, id_requisicao: str, empresa_id: str, custo: int) -> Tuple[bool, str]:
+    def autorizar_pagamento(self, id_requisicao: str, empresa_id: str, custo: int) -> Tuple[bool, str, bool]:
         if not self._reconectar_se_necessario():
-            return False, "LEDGER_OFFLINE"
+            return False, "LEDGER_OFFLINE", False
         try:
             resultado = self._invoke(self.CC_FN_AUTORIZAR_PAGAMENTO, [id_requisicao, empresa_id, str(custo)]) or {}
             sucesso = resultado.get("sucesso", False)
             motivo = resultado.get("motivo", "OK" if sucesso else "desconhecido")
+            transacao_inedita = resultado.get("transacao_inedita", False)
 
             if sucesso:
-                logger.info("[LedgerClient] Pagamento autorizado | req=%s emp=%s custo=%d saldo_restante=%s",
-                            id_requisicao[:8], empresa_id, custo, resultado.get("saldo_restante", "?"))
+                logger.info("[LedgerClient] Pagamento autorizado | req=%s emp=%s custo=%d inédita=%s",
+                            id_requisicao[:8], empresa_id, custo, transacao_inedita)
             else:
                 logger.warning("[LedgerClient] Pagamento NEGADO | req=%s emp=%s custo=%d motivo=%s",
                                id_requisicao[:8], empresa_id, custo, motivo)
 
-            return sucesso, motivo
+            return sucesso, motivo, transacao_inedita
         except Exception as e:
             logger.error("[LedgerClient] Erro ao autorizar pagamento | req=%s: %s", id_requisicao[:8], e)
             self._conectado = False
-            return False, "ERRO_REDE"
+            return False, "ERRO_REDE", False
 
     def registrar_laudo(
         self, id_requisicao: str, drone_id: str, base_id: str, setor_id: str,
