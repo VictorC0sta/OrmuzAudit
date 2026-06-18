@@ -1,0 +1,17 @@
+FROM golang:1.20-alpine AS build
+WORKDIR /app
+# Copia APENAS o código fonte, ignorando módulos corrompidos do host
+COPY token_contrato.go .
+
+# Instala as dependências do zero e compila
+RUN go mod init token_contract
+RUN go get github.com/hyperledger/fabric-chaincode-go/shim
+RUN go get github.com/hyperledger/fabric-contract-api-go/contractapi
+RUN go mod tidy
+RUN go build -o chaincode token_contrato.go
+
+FROM alpine:3.18
+WORKDIR /app
+COPY --from=build /app/chaincode /app/chaincode
+# O container vai ficar rodando este servidor gRPC
+CMD ["/app/chaincode"]
