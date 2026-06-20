@@ -1,15 +1,27 @@
-FROM python:3.12-slim
+FROM python:3.9-slim
 
 WORKDIR /app
 
-# Avisa ao Python para procurar módulos dentro da pasta shared também
+# Instala o compilador C e as ferramentas de desenvolvimento do sistema
+RUN apt-get update && apt-get install -y \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prepara o terreno para o SDK antigo compilar o pysha3 sem reclamar
+RUN pip install --no-cache-dir "setuptools<58.0.0" wheel
+
+# Instala a dependência do Fabric SDK
+RUN pip install --no-cache-dir fabric-sdk-py
+
 ENV PYTHONPATH="/app/shared"
 
-# 1. Copia a pasta shared
 COPY shared/ ./shared/
+COPY config/ ./config/
+COPY fabric/connection-profile.json ./fabric/connection-profile.json
+COPY setor/ ./setor/
 
-# 2. Copia TODOS os arquivos da pasta setor
-COPY setor/ .
+WORKDIR /app/setor
 
-# 3. Inicia o broker
+EXPOSE 5001-5008
 CMD ["python", "broker_setor.py"]

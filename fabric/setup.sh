@@ -1,23 +1,30 @@
 #!/bin/bash
 # fabric/setup.sh
 # Sobe toda a rede Hyperledger Fabric do zero.
-# Execute a partir da raiz do projeto: bash fabric/setup.sh
-#
-# Pré-requisitos:
-#   - Docker e Docker Compose instalados
-#   - Binários do Fabric no PATH: cryptogen, configtxgen, peer
-#   - Instale com: curl -sSL https://bit.ly/2ysbOFE | bash -s -- 2.5.0 1.5.7
 
-set -e  # Para tudo se qualquer comando falhar
+set -e
+
+# ==============================================================================
+# PROTEÇÃO CONTRA O GIT BASH NO WINDOWS & MODO OFFLINE
+# ==============================================================================
+export MSYS_NO_PATHCONV=1
+export GOFLAGS=""
 
 FABRIC_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$FABRIC_DIR")"
 
+export PATH=$PATH:$PROJECT_ROOT/bin
+
+# BARRA DUPLA (//opt/...) PARA O GIT BASH NÃO INJETAR O "C:/Program Files/"
+ORDERER_CA="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/ca.crt"
+
+# NOVA POLÍTICA DE ENDOSSO: 2 de 4 Organizações devem assinar para o bloco ser válido
+SIGNATURE_POLICY="OutOf(2, 'OrgNorteMSP.peer', 'OrgSulMSP.peer', 'OrgLesteMSP.peer', 'OrgOesteMSP.peer')"
+
 echo "========================================"
-echo "  ORMUZ — Setup da Rede Fabric"
+echo "  ORMUZ — Setup da Rede Fabric (Raft, 3 orderers)"
 echo "========================================"
 
-# ── 1. Limpeza de execuções anteriores ─────────────────────────────────────
 echo ""
 echo "[1/6] Limpando containers e volumes anteriores..."
 cd "$PROJECT_ROOT/docker"
@@ -26,56 +33,47 @@ rm -rf "$FABRIC_DIR/crypto-config"
 rm -rf "$FABRIC_DIR/channel-artifacts"
 mkdir -p "$FABRIC_DIR/channel-artifacts"
 
-# ── 2. Geração dos certificados criptográficos ──────────────────────────────
 echo ""
-echo "[2/6] Gerando certificados MSP (cryptogen)..."
+echo "[2/6] Gerando certificados MSP + TLS (cryptogen) para 3 orderers e 4 peers..."
 cd "$FABRIC_DIR"
 cryptogen generate --config=./crypto-config.yaml
+find crypto-config -type f -name "config.yaml" -exec sed -i 's|\\|/|g' {} +
+
 echo "  ✓ Certificados gerados em fabric/crypto-config/"
 
-# ── 3. Geração dos artefatos do channel ─────────────────────────────────────
 echo ""
-echo "[3/6] Gerando artefatos do channel (configtxgen)..."
-export FABRIC_CFG_PATH="$FABRIC_DIR"
+echo "[3/6] Gerando artefatos do channel (configtxgen) — bloco gênese já com os 3 consenters Raft..."
+cd "$FABRIC_DIR"
 
-# Bloco genesis do orderer
-configtxgen \
-  -profile OrmuzOrdererGenesis \
-  -channelID system-channel \
-  -outputBlock "$FABRIC_DIR/channel-artifacts/genesis.block"
+configtxgen -profile OrmuzOrdererGenesis -channelID system-channel -outputBlock ./channel-artifacts/genesis.block
 echo "  ✓ genesis.block criado"
 
-# Transação de criação do channel
-configtxgen \
-  -profile OrmuzChannel \
-  -outputCreateChannelTx "$FABRIC_DIR/channel-artifacts/ormuz-channel.tx" \
-  -channelID ormuz-channel
+configtxgen -profile OrmuzChannel -outputCreateChannelTx ./channel-artifacts/ormuz-channel.tx -channelID ormuz-channel
 echo "  ✓ ormuz-channel.tx criado"
 
-# Anchor peers de cada organização
-for ORG in OrgNorte OrgSul OrgLeste OrgOeste; do
-  configtxgen \
-    -profile OrmuzChannel \
-    -outputAnchorPeersUpdate "$FABRIC_DIR/channel-artifacts/${ORG}Anchors.tx" \
-    -channelID ormuz-channel \
-    -asOrg "${ORG}"
-  echo "  ✓ ${ORG}Anchors.tx criado"
-done
+configtxgen -profile OrmuzChannel -outputAnchorPeersUpdate ./channel-artifacts/OrgNorteAnchors.tx -channelID ormuz-channel -asOrg OrgNorte
+echo "  ✓ OrgNorteAnchors.tx criado"
 
-# ── 4. Subir containers ─────────────────────────────────────────────────────
+configtxgen -profile OrmuzChannel -outputAnchorPeersUpdate ./channel-artifacts/OrgSulAnchors.tx -channelID ormuz-channel -asOrg OrgSul
+echo "  ✓ OrgSulAnchors.tx criado"
+
+configtxgen -profile OrmuzChannel -outputAnchorPeersUpdate ./channel-artifacts/OrgLesteAnchors.tx -channelID ormuz-channel -asOrg OrgLeste
+echo "  ✓ OrgLesteAnchors.tx criado"
+
+configtxgen -profile OrmuzChannel -outputAnchorPeersUpdate ./channel-artifacts/OrgOesteAnchors.tx -channelID ormuz-channel -asOrg OrgOeste
+echo "  ✓ OrgOesteAnchors.tx criado"
+
 echo ""
-echo "[4/6] Subindo containers Docker (orderer + 4 peers + cli)..."
+echo "[4/6] Subindo containers Docker (3 orderers Raft + 4 peers + cli)..."
 cd "$PROJECT_ROOT/docker"
 docker compose -f docker-compose.fabric.yml up -d
 echo "  ✓ Containers iniciados"
-echo "  Aguardando 10s para estabilizar..."
-sleep 10
+echo "  Aguardando 15s para o cluster Raft eleger um líder..."
+sleep 15
 
-# ── 5. Criar channel e fazer join dos peers ─────────────────────────────────
 echo ""
 echo "[5/6] Criando channel 'ormuz-channel' e conectando os peers..."
 
-# Função auxiliar para executar comandos no peer correto via CLI
 peer_exec() {
   local ORG=$1
   local PEER_ADDRESS=$2
@@ -84,19 +82,23 @@ peer_exec() {
   docker exec cli \
     env CORE_PEER_ADDRESS="$PEER_ADDRESS" \
         CORE_PEER_LOCALMSPID="$MSP_ID" \
-        CORE_PEER_MSPCONFIGPATH="/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/${ORG}/users/Admin@${ORG}/msp" \
+        CORE_PEER_CLIENTCONNTIMEOUT=300s \
+        CORE_PEER_DELIVERYCLIENTCONNTIMEOUT=300s \
+        CORE_PEER_TLS_ENABLED=true \
+        CORE_PEER_TLS_ROOTCERT_FILE="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/${ORG}/peers/peer0.${ORG}/tls/ca.crt" \
+        CORE_PEER_MSPCONFIGPATH="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/${ORG}/users/Admin@${ORG}/msp" \
     "$@"
 }
 
-# OrgNorte cria o channel
 peer_exec "norte.ormuz.com" "peer0.norte.ormuz.com:7051" "OrgNorteMSP" \
   peer channel create \
-    -o orderer.ormuz.com:7050 \
+    -o orderer1.ormuz.com:7050 \
     -c ormuz-channel \
-    -f /opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts/ormuz-channel.tx
+    -f //opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts/ormuz-channel.tx \
+    --tls true \
+    --cafile "$ORDERER_CA"
 echo "  ✓ Channel 'ormuz-channel' criado"
 
-# Cada peer entra no channel
 declare -A PEERS=(
   ["norte.ormuz.com"]="peer0.norte.ormuz.com:7051 OrgNorteMSP"
   ["sul.ormuz.com"]="peer0.sul.ormuz.com:8051 OrgSulMSP"
@@ -111,19 +113,18 @@ for DOMAIN in "${!PEERS[@]}"; do
   echo "  ✓ peer0.${DOMAIN} entrou no channel"
 done
 
-# ── 6. Instalar e inicializar o chaincode ───────────────────────────────────
 echo ""
 echo "[6/6] Instalando chaincode 'token_contract'..."
 
-# Empacota o chaincode
+# Injeta -mod=vendor para garantir o build offline isolado
 docker exec cli \
+  env GOFLAGS="-mod=vendor" \
   peer lifecycle chaincode package /tmp/token.tar.gz \
-    --path /opt/gopath/src/github.com/hyperledger/fabric/peer/chaincode \
+    --path //opt/gopath/src/github.com/hyperledger/fabric/peer/chaincode \
     --lang golang \
     --label token_v1
 echo "  ✓ Chaincode empacotado"
 
-# Instala em cada peer
 for DOMAIN in "${!PEERS[@]}"; do
   read -r ADDR MSP <<< "${PEERS[$DOMAIN]}"
   peer_exec "$DOMAIN" "$ADDR" "$MSP" \
@@ -131,42 +132,53 @@ for DOMAIN in "${!PEERS[@]}"; do
   echo "  ✓ Chaincode instalado em peer0.${DOMAIN}"
 done
 
-# Obtém o Package ID gerado
-PKG_ID=$(docker exec cli \
-  peer lifecycle chaincode queryinstalled \
+# Recuperando o Package ID com as variáveis TLS explícitas
+PKG_ID=$(docker exec \
+  -e CORE_PEER_TLS_ENABLED=true \
+  -e CORE_PEER_TLS_ROOTCERT_FILE="//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/peers/peer0.norte.ormuz.com/tls/ca.crt" \
+  cli peer lifecycle chaincode queryinstalled \
   | grep "token_v1" | awk -F 'Package ID: ' '{print $2}' | awk -F ',' '{print $1}')
 echo "  Package ID: $PKG_ID"
 
-# Cada organização aprova o chaincode
 for DOMAIN in "${!PEERS[@]}"; do
   read -r ADDR MSP <<< "${PEERS[$DOMAIN]}"
   peer_exec "$DOMAIN" "$ADDR" "$MSP" \
     peer lifecycle chaincode approveformyorg \
-      -o orderer.ormuz.com:7050 \
+      -o orderer1.ormuz.com:7050 \
       --channelID ormuz-channel \
       --name token_contract \
       --version 1.0 \
       --package-id "$PKG_ID" \
-      --sequence 1
-  echo "  ✓ ${MSP} aprovou o chaincode"
+      --sequence 1 \
+      --signature-policy "$SIGNATURE_POLICY" \
+      --waitForEventTimeout 300s \
+      --tls true \
+      --cafile "$ORDERER_CA"
+  echo "  ✓ ${MSP} aprovou o chaincode (Política: 2 de 4)"
 done
 
-# Commit do chaincode no channel
+# Commit final exigindo o ca.crt de todos os 4 peers
 peer_exec "norte.ormuz.com" "peer0.norte.ormuz.com:7051" "OrgNorteMSP" \
   peer lifecycle chaincode commit \
-    -o orderer.ormuz.com:7050 \
+    -o orderer1.ormuz.com:7050 \
     --channelID ormuz-channel \
     --name token_contract \
     --version 1.0 \
     --sequence 1 \
+    --signature-policy "$SIGNATURE_POLICY" \
+    --waitForEventTimeout 30s \
+    --tls true \
+    --cafile "$ORDERER_CA" \
     --peerAddresses peer0.norte.ormuz.com:7051 \
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/norte.ormuz.com/peers/peer0.norte.ormuz.com/tls/ca.crt" \
     --peerAddresses peer0.sul.ormuz.com:8051 \
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/sul.ormuz.com/peers/peer0.sul.ormuz.com/tls/ca.crt" \
     --peerAddresses peer0.leste.ormuz.com:9051 \
-    --peerAddresses peer0.oeste.ormuz.com:10051
-echo "  ✓ Chaincode commitado no channel"
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/leste.ormuz.com/peers/peer0.leste.ormuz.com/tls/ca.crt" \
+    --peerAddresses peer0.oeste.ormuz.com:10051 \
+    --tlsRootCertFiles "//opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/oeste.ormuz.com/peers/peer0.oeste.ormuz.com/tls/ca.crt"
+echo "  ✓ Chaincode commitado no channel (Política: 2 de 4)"
 
 echo ""
 echo "========================================"
-echo "  Rede Fabric pronta!"
-echo "  Próximo passo: bash fabric/init_ledger.sh"
-echo "========================================"
+echo "  Rede Fabric configurada com sucesso!"

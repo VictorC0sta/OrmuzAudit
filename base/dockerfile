@@ -1,16 +1,27 @@
-FROM python:3.11-slim
+FROM python:3.9-slim
 
 WORKDIR /app
 
-# Copia as pastas com os nomes corretos
+# Instala o compilador C e as ferramentas de desenvolvimento
+RUN apt-get update && apt-get install -y \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prepara o terreno para o SDK antigo compilar o pysha3 sem reclamar
+RUN pip install --no-cache-dir "setuptools<58.0.0" wheel
+
+# Instala a dependência do Fabric SDK
+RUN pip install --no-cache-dir fabric-sdk-py
+
+ENV PYTHONPATH="/app/shared"
+
 COPY shared/ ./shared/
 COPY config/ ./config/
+COPY fabric/connection-profile.json ./fabric/connection-profile.json
 COPY base/ ./base/
 
-# Entra na pasta renomeada
 WORKDIR /app/base
 
 EXPOSE 6001 6101/udp
-
-# Executa o script com o novo nome
 CMD ["python", "broker.py"]

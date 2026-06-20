@@ -1,6 +1,6 @@
 # =============================================================
 #  PC 1 — Brokers de Setor (S1 a S8)
-#  Rodar com: docker compose -f docker-compose.setores.yml up
+#  Rodar com: docker compose -f docker-compose.setores.yml up -d
 # =============================================================
 
 services:
@@ -14,11 +14,11 @@ services:
     ports:
       - "${PORTA_S1}:${PORTA_S1}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S1"
       SETOR_NOME: "Norte"
       MINHA_PORTA: "${PORTA_S1}"
       IP_MONITOR: "${IP_MONITOR}"
-      # Endereços das 4 bases (PC 2)
       IP_BASE_NORTE: "${IP_PC_BASES}"
       IP_BASE_SUL: "${IP_PC_BASES}"
       IP_BASE_LESTE: "${IP_PC_BASES}"
@@ -28,8 +28,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "NORTE,OESTE,LESTE,SUL"
+      # S1/S2 usam o peer da base Norte
+      FABRIC_ORG_DOMAIN: "OrgNorte"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s2:
     build:
@@ -40,6 +48,7 @@ services:
     ports:
       - "${PORTA_S2}:${PORTA_S2}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S2"
       SETOR_NOME: "Sul"
       MINHA_PORTA: "${PORTA_S2}"
@@ -53,8 +62,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "SUL,LESTE,OESTE,NORTE"
+      # S1/S2 usam o peer da base Norte
+      FABRIC_ORG_DOMAIN: "OrgNorte"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.norte.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s3:
     build:
@@ -65,6 +82,7 @@ services:
     ports:
       - "${PORTA_S3}:${PORTA_S3}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S3"
       SETOR_NOME: "Leste"
       MINHA_PORTA: "${PORTA_S3}"
@@ -78,8 +96,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "LESTE,NORTE,SUL,OESTE"
+      # S3/S4 usam o peer da base Sul
+      FABRIC_ORG_DOMAIN: "OrgSul"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.sul.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s4:
     build:
@@ -90,6 +116,7 @@ services:
     ports:
       - "${PORTA_S4}:${PORTA_S4}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S4"
       SETOR_NOME: "Oeste"
       MINHA_PORTA: "${PORTA_S4}"
@@ -103,8 +130,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "OESTE,NORTE,SUL,LESTE"
+      # S3/S4 usam o peer da base Sul
+      FABRIC_ORG_DOMAIN: "OrgSul"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.sul.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s5:
     build:
@@ -115,6 +150,7 @@ services:
     ports:
       - "${PORTA_S5}:${PORTA_S5}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S5"
       SETOR_NOME: "Centro1"
       MINHA_PORTA: "${PORTA_S5}"
@@ -128,8 +164,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "NORTE,LESTE,SUL,OESTE"
+      # S5/S6 usam o peer da base Leste
+      FABRIC_ORG_DOMAIN: "OrgLeste"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.leste.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s6:
     build:
@@ -140,6 +184,7 @@ services:
     ports:
       - "${PORTA_S6}:${PORTA_S6}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S6"
       SETOR_NOME: "Centro2"
       MINHA_PORTA: "${PORTA_S6}"
@@ -153,8 +198,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "LESTE,NORTE,SUL,OESTE"
+      # S5/S6 usam o peer da base Leste
+      FABRIC_ORG_DOMAIN: "OrgLeste"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.leste.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s7:
     build:
@@ -165,6 +218,7 @@ services:
     ports:
       - "${PORTA_S7}:${PORTA_S7}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S7"
       SETOR_NOME: "Centro3"
       MINHA_PORTA: "${PORTA_S7}"
@@ -178,8 +232,16 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "NORTE,SUL,LESTE,OESTE"
+      # S7/S8 usam o peer da base Oeste
+      FABRIC_ORG_DOMAIN: "OrgOeste"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.oeste.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
   broker_s8:
     build:
@@ -190,6 +252,7 @@ services:
     ports:
       - "${PORTA_S8}:${PORTA_S8}"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       SETOR_ID: "S8"
       SETOR_NOME: "Centro4"
       MINHA_PORTA: "${PORTA_S8}"
@@ -203,9 +266,20 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       PRIORIDADE: "LESTE,SUL,NORTE,OESTE"
+      # S7/S8 usam o peer da base Oeste
+      FABRIC_ORG_DOMAIN: "OrgOeste"
+      FABRIC_USER: "Admin"
+      FABRIC_PEERS: "peer0.oeste.ormuz.com"
+    volumes:
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
+      - ormuz_fabric
 
 networks:
   ormuz_net:
     driver: bridge
+  ormuz_fabric:
+    external: true
+    name: docker_ormuz_fabric

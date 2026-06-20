@@ -1,384 +1,281 @@
-# Estreito de Ormuz: Central de Comando e Visualização
-### Infraestrutura Distribuída para Coordenação de Drones Autônomos de Monitoramento Marítimo
-*Disciplina TEC502 — Sistemas Distribuídos · UEFS*
+# Estreito de Ormuz: Central de Comando, Economia e Auditoria de Guerra
+
+### Central de Monitoramento Marítimo e Ledger Distribuído Permissionado para Gestão e Log Imutável de Ativos
+
+*Disciplina TEC502 — Sistemas Distribuídos · Universidade Estadual de Feira de Santana (UEFS)*
 
 ---
 
-## Visão Geral
+## 📑 Índice / Sumário
 
-O sistema monitora o Estreito de Ormuz dividindo a área operacional em **8 setores marítimos**, cada um com um sensor e um broker próprio. Uma frota de drones autônomos é compartilhada entre **4 bases** (Norte, Sul, Leste, Oeste), que competem de forma coordenada para atender as ocorrências reportadas pelos sensores.
-
-O objetivo central é garantir que nenhum drone seja despachado duas vezes para a mesma ocorrência, que requisições críticas sejam priorizadas e que o sistema continue operando mesmo quando componentes falham.
-
----
-
-## Arquitetura
-
-O sistema segue o estilo **broker distribuído sem ponto central de falha**. Não existe um coordenador único — cada base possui sua própria cópia da fila e toma decisões de forma autônoma usando um mecanismo de exclusão mútua por timeout diferenciado.
-
-```
-[Sensor S1..S8]
-      │ TCP (alerta)
-      ▼
-[Broker de Setor S1..S8]
-      │ TCP broadcast simultâneo
-      ▼
-[Base NORTE] [Base SUL] [Base LESTE] [Base OESTE]
-      │              │
-      │ TCP broadcast de ACEITE (cancela as outras)
-      │
-      ▼
-[Drone despachado via TCP]
-      │ UDP heartbeat periódico
-      ▼
-[Base monitora e detecta falha]
-```
-
-Cada camada roda isolada em contêineres Docker, em computadores distintos no laboratório.
-
-**Ausência de ponto único de falha:** cada base mantém sua própria fila replicada e toma decisões de forma autônoma. Se um broker de setor cair, os demais 7 setores continuam operando sem interrupção. Se uma base cair, as outras 3 assumem normalmente após seus timeouts — nenhuma decisão depende de um nó central. A evidência de execução distribuída está documentada na seção [Teste de Resiliência](#teste-de-resiliência).
+1. [Visão Geral do Sistema](#1-visão-geral-do-sistema)
+2. [Arquitetura em Duas Camadas (A Escolha do Design)](#2-arquitetura-em-duas-camadas-a-escolha-do-design)
+3. [Infraestrutura da Blockchain e Topologia da Rede](#3-infraestrutura-da-blockchain-e-topologia-da-rede)
+4. [Gestão Descentralizada de Ativos e Autenticação (A Gênese)](#4-gestão-descentralizada-de-ativos-e-autenticação-a-gênese)
+5. [Fluxo de Pagamento e Resolução Definitiva de Duplo Gasto](#5-fluxo-de-pagamento-e-resolução-definitiva-de-duplo-gasto)
+6. [Proteção Avançada contra Duplo Despacho (Race Conditions)](#6-proteção-avançada-contra-duplo-despacho-race-conditions)
+7. [Log de Operações Imutável e Auditabilidade Visual](#7-log-de-operações-imutável-e-auditabilidade-visual)
+8. [Estrutura de Pastas Atualizada](#8-estrutura-de-pastas-atualizada)
+9. [Guião Completo de Execução e Testes Práticos](#9-guião-completo-de-execução-e-testes-práticos)
+10. [Demonstrações de Defesa Essenciais (Gabarito do Barema)](#10-demonstrações-de-defesa-essenciais-gabarito-do-barema)
 
 ---
 
-## Componentes
+## 1. Visão Geral do Sistema
 
-### Sensor (`sensor/sensor.py`)
-Simula um sensor naval que gera ocorrências aleatórias em intervalos configuráveis via `INTERVALO_MIN` e `INTERVALO_MAX`. Sorteia o tipo de ocorrência com pesos (eventos críticos são raros — `embarcacao_perigo` tem peso 3; anomalias menores são frequentes — peso 35) e envia um alerta via TCP para o broker do seu setor.
+O sistema evoluiu de uma infraestrutura estritamente operacional para uma **arquitetura em duas camadas independentes**, projetada para resolver a falta de confiança mútua, a espionagem e a possibilidade de adulteração de logs entre nações concorrentes no Estreito de Ormuz.
 
-Não possui interface gráfica — opera de forma autônoma para simular carga real no sistema. Um atraso inicial aleatório (2–8s) evita que todos os sensores disparem ao mesmo tempo na subida dos contêineres.
-
-### Broker de Setor (`setor/broker_setor.py`)
-Recebe alertas dos sensores, incrementa o relógio de Lamport e faz **broadcast simultâneo** para as 4 bases usando `ThreadPoolExecutor`. Implementa **retry com backoff** (`BROADCAST_MAX_TENTATIVAS=3`, `BROADCAST_RETRY_DELAY_S=1.0`): se uma base estiver reiniciando, o setor tentará reenviá-la até esgotar as tentativas sem interromper as outras. Cada setor tem sua própria ordem de prioridade de bases, definida em `config/prioridade_tabela.json`.
-
-### Broker de Base (`base/broker.py`)
-É o componente mais complexo do sistema. Ao receber uma requisição:
-1. Filtra duplicatas via `verificar_e_registrar_vista()` (idempotência).
-2. Sincroniza o relógio de Lamport com `clock.atualizar(ts)`.
-3. Registra na fila replicada local, já ordenada por criticidade → timestamp → setor.
-4. Agenda um `threading.Timer` com timeout proporcional à sua posição de prioridade para aquele setor.
-5. Ao disparar o timer, tenta aceitar atomicamente com `marcar_aceita()` (protegido por `threading.Lock`).
-6. Se vencer, faz broadcast de `ACEITE` para as outras bases cancelarem seus timers.
-7. Despacha o drone via TCP com os dados da missão.
-
-Também monitora os heartbeats dos drones em thread dedicada (`_monitor_heartbeat`) e detecta falhas por ausência de sinal após `HEARTBEAT_TIMEOUT` segundos.
-
-### Drone (`drone/drone.py`)
-Ao iniciar, tenta se registrar na base de origem via TCP com **exponential backoff** (até `MAX_TENTATIVAS=5`, espera de 2s → 4s → 8s... com teto em 30s). Mantém um loop de heartbeat UDP periódico informando seu estado. Ao receber uma missão, executa em thread separada para não bloquear o servidor TCP — simula a duração com `time.sleep(random.uniform(MIN, MAX))` e ao concluir envia uma mensagem TCP de volta à base liberando-se para novas missões.
-
-O estado interno (`LIVRE` / `OCUPADO`) é protegido por `threading.Lock` na classe `Drone`, garantindo atomicidade mesmo sob tentativas de missão concorrentes.
-
-### Monitor (`monitor/index.html` + `monitor/monitor_bridge.py`)
-Painel web que visualiza o estado do sistema em tempo real. O `monitor_bridge.py` recebe eventos UDP na porta 8000 (enviados pelas bases via `notificar_monitor()` em `shared/protocolo.py`) e os repassa via WebSocket (porta 8001) para o navegador.
-
-O painel também funciona em **modo simulação** independente, sem conexão real, permitindo testar a lógica de priorização, derrubada de bases e stress test diretamente no browser.
+A central coordena o monitoramento de **8 setores marítimos**, cada um pertencente a uma empresa de navegação comercial específica (`EMPRESA-A` a `EMPRESA-H`), utilizando uma frota de drones autônomos compartilhada entre **4 bases operacionais** (`Norte`, `Sul`, `Leste`, `Oeste`). Toda a camada de liquidação financeira, custeio de missões, prevenção de fraudes e log imutável de laudos é gerida nativamente por uma rede blockchain permissionada corporativa baseada em **Hyperledger Fabric**.
 
 ---
 
-## Protocolos de Comunicação
+## 2. Arquitetura em Duas Camadas (A Escolha do Design)
 
-### Por que TCP para mensagens críticas?
-Alertas, requisições, aceites e missões usam TCP porque a entrega garantida e a detecção de falha na conexão são essenciais — perder uma requisição significa uma ocorrência não atendida. O protocolo usa **length-prefixing** (4 bytes big-endian seguidos do payload JSON), implementado em `shared/protocolo.py` via `struct.pack(">I", len(dados))`, para delimitar mensagens no stream TCP e evitar o problema clássico de framing. Tentativas automáticas com `max_tentativas=3` e pausa de 0.5s entre elas estão embutidas em `tcp_enviar()`.
+O sistema adota um design híbrido desacoplado para equilibrar os requisitos conflitantes de tempo real e consistência forte:
 
-### Por que UDP para heartbeats?
-Os heartbeats dos drones são enviados a cada `HEARTBEAT_INTERVALO` segundos (padrão: 3s). A perda ocasional de um pacote é tolerável — o sistema só marca o drone como perdido após `HEARTBEAT_TIMEOUT` segundos sem receber nenhum pacote. UDP elimina o overhead de conexão para mensagens de alta frequência e baixa criticidade.
+```
+                  ┌─────────────────────────────────────────┐
+                  │          Sensor de Setor (S1..S8)       │
+                  └────────────────────┬────────────────────┘
+                                       │ Assinatura HMAC (Autenticação)
+                                       ▼
+                  ┌─────────────────────────────────────────┐
+                  │         Broker de Setor (S1..S8)        │
+                  └────────────────────┬────────────────────┘
+                                       │
+                  ┌────────────────────┴────────────────────┐
+                  │ Broadcast TCP Simultâneo (Requisição)   │
+                  ▼                                         ▼
+   ┌─────────────────────────────┐           ┌─────────────────────────────┐
+   │     Broker da Base NORTE    │           │      Broker da Base SUL     │
+   └──────────────┬──────────────┘           └──────────────┬──────────────┘
+                  │                                         │
+ ┌────────────────┼────────────────┐       ┌────────────────┼────────────────┐
+ │ CAMADA 1:      │                │       │ CAMADA 1:      │                │
+ │ Coordenação    │ Timeout TDMA   │       │ Coordenação    │ Timeout TDMA   │
+ │ Operacional    │ Local          │       │ Operacional    │ Local          │
+ │ (Tempo Real)   │                │       │ (Tempo Real)   │                │
+ └────────────────┼────────────────┘       └────────────────┼────────────────┘
+                  │                                         │
+ ┌────────────────┼────────────────┐       ┌────────────────┼────────────────┐
+ │ CAMADA 2:      │ gRPC           │       │ CAMADA 2:      │ gRPC           │
+ │ Consenso Forte │ (Invoke)       │       │ Consenso Forte │ (Invoke)       │
+ │ e Auditoria    ▼                │       │ e Auditoria    ▼                │
+ │ (Blockchain) ┌────────────────┐ │       │ (Blockchain) ┌────────────────┐ │
+ │              │ peer0.norte    │ │       │              │ peer0.sul      │ │
+ └──────────────┼───────┬────────┼─┘       └──────────────┼───────┬────────┼─┘
+                │       │        │                        │       │        │
+                │       │        └───────────┐┌───────────┘       │        │
+                │       │                    ││                   │        │
+                │       ▼                    ▼▼                   ▼        │
+                │  ┌────────────────────────────────────────────────────┐  │
+                │  │       Cluster de Consenso Raft (3 Orderers)        │  │
+                │  └────────────────────────────────────────────────────┘  │
+                │                                                          │
+                └──────────────────────────────────────────────────────────┘
 
-### API de Comunicação entre Componentes
+```
 
-| Fluxo | Protocolo | Mensagem | Campos principais |
-|---|---|---|---|
-| Sensor → Broker Setor | TCP | `MensagemAlerta` | `setor_id`, `tipo_ocorrencia`, `criticidade`, `id_alerta` |
-| Broker Setor → Bases | TCP broadcast | `MensagemRequisicao` | `id_requisicao`, `id_setor`, `timestamp_logico`, `criticidade`, `tipo_ocorrencia` |
-| Base → Outras Bases | TCP broadcast | `ACEITE` | `id_requisicao`, `base_id`, `drone_id`, `timestamp_logico` |
-| Base → Drone | TCP | `MISSAO` | `id_requisicao`, `setor_id`, `criticidade`, `tipo_ocorrencia`, `base_origem` |
-| Drone → Base (periódico) | UDP | `MensagemHeartbeat` | `drone_id`, `estado`, `id_requisicao` |
-| Drone → Base (conclusão) | TCP | `HEARTBEAT` + `missao_concluida` | `drone_id`, `estado=LIVRE`, `missao_concluida` |
-| Base → Outras Bases (falha) | TCP broadcast | `REEMISSAO` | `id_requisicao`, `id_setor`, `criticidade`, `timestamp_logico_base` |
-| Base/Setor → Monitor | UDP fire-and-forget | evento | `tipo`, `base`, `drone`, `setor` |
+### Justificação dos Trade-Offs (Defesa Acadêmica para a Arguição)
 
-#### Operações remotas detalhadas
-
-**`registrar_drone(drone_id, base_id, porta) → bool`**
-Enviada pelo drone ao iniciar, via TCP para a base de origem. Registra o drone na frota local e dispara `_processar_fila_pendente` em thread separada.
-
-**`solicitar_drone(id_setor, criticidade, tipo_ocorrencia, timestamp_logico) → void`**
-Broadcast do broker de setor para todas as bases simultaneamente. Cada base insere a requisição em sua fila local e agenda um timer de prioridade.
-
-**`confirmar_aceite(id_requisicao, base_id, drone_id, timestamp_logico) → void`**
-Broadcast da base vencedora para as demais. Cancela os timers pendentes nas outras bases para aquela requisição via `timer.cancel()`.
-
-**`despachar_missao(id_requisicao, setor_id, criticidade, tipo_ocorrencia, base_origem) → bool`**
-Enviada da base para o drone via TCP. Se a conexão falhar, `_tratar_drone_perdido()` é chamado imediatamente.
-
-**`liberar_drone(drone_id, estado, missao_concluida) → void`**
-Enviada pelo drone à base ao concluir uma missão, via TCP. Marca a requisição como `CONCLUIDA` e aciona `_processar_fila_pendente`.
-
-**`heartbeat_drone(drone_id, base_id, estado, id_requisicao) → void`**
-Enviada periodicamente pelo drone à base, via UDP (fire-and-forget). Atualiza `ultimo_heartbeat` e `estado` na `InfoDrone` local.
+* **Camada 1: Coordenação Operacional (Baixa Latência):** O despacho de drones e a prevenção de colisões/alocações duplicadas na malha aérea exigem respostas na ordem de milissegundos. O mecanismo de **exclusão mútua por timeouts locais estáticos (TDMA)** e relógios de Lamport do Problema 2 foi mantido para fins operacionais. O consenso de uma blockchain (~1 a 2 segundos por bloco) é incompatível com o despacho de hardware em tempo real.
+* **Camada 2: Liquidação e Auditoria (Consenso Forte):** O Hyperledger Fabric atua estritamente na gestão dos ativos e no log de laudos. Como os nós representam nações e bases militares conhecidas, uma blockchain *permissionada* é ideal: elimina o overhead de mineração e taxas voláteis (*gas*) de redes públicas (como Ethereum), provê identidades criptográficas via CAs e garante privacidade consorcial.
 
 ---
 
-## Exclusão Mútua Distribuída
+## 3. Infraestrutura da Blockchain e Topologia da Rede
 
-### Algoritmo: Time-Division Priority Slot (inspirado em TDMA)
+A rede blockchain é composta por uma topologia de nível empresarial configurada via contêineres Docker interconectados na rede externa compartilhada.
 
-O sistema implementa exclusão mútua distribuída por meio de **janelas de tempo com prioridade estática por setor**, uma abordagem inspirada no protocolo TDMA (*Time Division Multiple Access*). Difere de Ricart-Agrawala (que requer troca de mensagens de permissão entre todos os nós) e de token ring (que requer passagem sequencial de token): aqui, a coordenação é implícita — cada base sabe de antemão qual é sua janela de tempo e age dentro dela sem precisar de confirmação prévia dos demais.
+* **Camada de Ordenação (Ordering Service):** Cluster de **3 nós Orderers rodando o protocolo Raft** (`orderer1`, `orderer2`, `orderer3.ormuz.com`), garantindo tolerância a falhas por travamento (CFT). Se um orderer falhar, a eleição interna do Raft estabelece um novo líder de forma transparente para as bases.
+* **Camada de Endosso (Peers das Organizações):** **4 Peers independentes**, um para cada organização/base do consórcio internacional:
+* `peer0.norte.ormuz.com` (OrgNorteMSP)
+* `peer0.sul.ormuz.com` (OrgSulMSP)
+* `peer0.leste.ormuz.com` (OrgLesteMSP)
+* `peer0.oeste.ormuz.com` (OrgOesteMSP)
 
-**Funcionamento:**
 
-Cada base possui uma posição de prioridade para cada setor (definida em `config/prioridade_tabela.json` e lida por `base/prioridade.py`):
-
-- Posição 1 (prioridade máxima): timeout = 0ms — tenta aceitar imediatamente
-- Posição 2: timeout = 200ms (`TIMEOUT_BASE_2`)
-- Posição 3: timeout = 400ms (`TIMEOUT_BASE_3`)
-- Posição 4: timeout = 600ms (`TIMEOUT_BASE_4`)
-
-Quando a base de maior prioridade aceita e faz broadcast do `ACEITE`, as outras bases cancelam seus timers e descartam a requisição. A transição `PENDENTE → ACEITA` é feita atomicamente em `FilaReplicada.marcar_aceita()` com `threading.Lock`, e o ID da requisição é registrado em um set `requisicoes_vistas` para evitar processamento duplicado.
-
-**Propriedades garantidas:**
-- **Segurança (safety):** `marcar_aceita()` usa `fila_lock` + verificação de `StatusRequisicao.PENDENTE` — apenas uma thread consegue fazer a transição atomicamente.
-- **Vivacidade (liveness):** mesmo que a base de maior prioridade esteja offline, a próxima na fila assume após seu timeout, garantindo progresso.
-- **Ordenação causal:** o relógio de Lamport em `shared/lamport.py` (usando `max(local, recebido) + 1`) garante que requisições mais antigas sejam processadas primeiro, mesmo sob atrasos de rede.
-- **Encaminhamento passivo:** `_processar_fila_pendente()` varre requisições `PENDENTE` sem timers ativos, garantindo que missões não sejam perdidas por falta temporária de drones.
+* **Política de Endosso Personalizada (Signature Policy):** O contrato foi implantado com a regra estrita `OutOf(2, 'OrgNorteMSP.peer', 'OrgSulMSP.peer', 'OrgLesteMSP.peer', 'OrgOesteMSP.peer')`. Qualquer alteração de estado (débito ou laudo) exige a assinatura digital e o aval de **pelo menos 2 organizações independentes**. Isso impede que uma única base maliciosa manipule dados de forma unilateral e garante que a rede sobreviva com tolerância total se 1 peer for completamente desligado durante a arguição do professor.
 
 ---
 
-## Priorização de Requisições
+## 4. Gestão Descentralizada de Ativos e Autenticação (A Gênese)
 
-A fila de cada base é ordenada por `EntradaFila.chave_ordenacao()`, com três critérios em cascata:
+Para mitigar o risco de uma "autoridade central disfarçada", a inicialização do ledger foi completamente descentralizada.
 
-1. **Criticidade** — `CRITICA` (peso 3) > `ALTA` (peso 2) > `BAIXA` (peso 1) — negado para ordenação crescente
-2. **Timestamp de Lamport** — menor valor = chegou primeiro logicamente
-3. **ID do setor** — desempate lexicográfico
+### Vinculação de Identidade Criptográfica (MSP)
 
-A inserção chama `fila.sort(key=lambda e: e.chave_ordenacao())` após cada novo item, mantendo a fila sempre ordenada.
+O script de setup não utiliza uma identidade administrativa centralizada para gerar as carteiras. No momento da gênese, o script `fabric/init_ledger.sh` assume dinamicamente o par de chaves e o MSP da organização de controle da empresa correspondente:
 
----
+* `EMPRESA-A` e `EMPRESA-B` $\rightarrow$ Registradas e assinadas via `OrgNorteMSP`
+* `EMPRESA-C` e `EMPRESA-D` $\rightarrow$ Registradas e assinadas via `OrgSulMSP`
+* `EMPRESA-E` e `EMPRESA-F` $\rightarrow$ Registradas e assinadas via `OrgLesteMSP`
+* `EMPRESA-G` e `EMPRESA-H` $\rightarrow$ Registradas e assinadas via `OrgOesteMSP`
 
-## Tolerância a Falhas
+### Validação de Propriedade do Ativo
 
-### Falha de drone
-`_monitor_heartbeat()` roda em thread dedicada (nome `mon-hb`) e verifica a cada `HEARTBEAT_INTERVALO_S` se algum drone ultrapassou `HEARTBEAT_TIMEOUT_S` sem sinal. Ao detectar:
-1. Drone é marcado como `PERDIDO` em `InfoDrone.estado`.
-2. A requisição em curso volta ao status `PENDENTE` na fila local.
-3. Broadcast de `REEMISSAO` para as outras bases recolocarem a requisição em suas filas.
-4. A própria base agenda um novo timer para tentar assumir a missão com outro drone disponível.
-
-### Falha de broker de setor
-Se um broker de setor cair, os outros 7 setores continuam operando normalmente. O sensor daquele setor registrará falha de conexão e tentará novamente no próximo ciclo. `restart: unless-stopped` no compose reinicia o container automaticamente.
-
-### Falha de base
-As outras 3 bases continuam operando. Requisições que estavam em timers na base derrubada não são canceladas nas demais — as outras assumem normalmente após seus timeouts. Se a base que venceu a requisição cair após o `ACEITE` (mas antes de concluir), o drone associado eventualmente dispara `_tratar_drone_perdido` nas outras bases via timeout de heartbeat.
-
-### Drone não responsivo no despacho
-Se `tcp_enviar` para o drone falhar em `_despachar_drone`, `_tratar_drone_perdido` é chamado imediatamente (sem aguardar timeout de heartbeat), devolvendo a missão à fila.
+Dentro do Smart Contract (`chaincode/token_contract.go`), a função `TransferirTokens` captura a identidade do chamador em tempo de execução usando `ctx.GetClientIdentity().GetMSPID()`. O chaincode compara esse valor com o MSP gravado na criação da carteira. Uma tentativa de transferência originada pela Base Leste sobre ativos da Empresa A (Norte) resultará em uma rejeição imediata da transação diretamente na máquina de estado do Fabric.
 
 ---
 
-## Como Executar
+## 5. Fluxo de Pagamento e Resolução Definitiva de Duplo Gasto
 
-### Pré-requisitos
-- Docker e Docker Compose instalados em todos os PCs
-- Arquivo `docker/.env` copiado para todos os PCs (mesmo conteúdo)
-- IPs dos PCs preenchidos no `docker/.env`
+O sistema implementa um fluxo de pagamento **estritamente pré-pago**, eliminando a vulnerabilidade onde drones voavam de graça se a empresa ficasse sem saldo durante o percurso.
 
-### Configurar o `docker/.env`
-```env
-IP_PC_SETORES=<IP do PC 1>
-IP_PC_BASES=<IP do PC 2>
-IP_PC_DRONES=<IP do PC 3>
-IP_PC_SENSORES=<IP do PC 4>
-IP_MONITOR=<IP do PC que exibirá o monitor>
+```
+┌───────────────┐        1. ConsultarSaldo        ┌───────────────┐
+│ Broker Setor  ├────────────────────────────────►  Peer Local   │
+│ (Fail-Open)   ◄────────────────────────────────┤   do Fabric   │
+└───────┬───────┘        Retorna Saldo/Status     └───────────────┘
+        │
+        │ 2. Broadcast de Requisição
+        ▼
+┌───────────────┐        3. AutorizarPagamento    ┌───────────────┐
+│  Broker Base  ├────────────────────────────────►  Rede Fabric  │
+│ (Vencedor)    ◄────────────────────────────────┤ (MVCC Block)  │
+└───────┬───────┘        Sucesso / JaAutorizado   └───────────────┘
+        │
+        │ 4. Despacho Real (Se verificado OK)
+        ▼
+┌───────────────┐
+│     Drone     │
+└───────────────┘
+
 ```
 
-### PC 1 — Brokers de Setor
-```bash
-docker compose -f docker/docker-compose.setores.yml up --build
-```
-Sobe 8 brokers (S1 a S8) nas portas 5051–5058.
+1. **Pré-Filtragem Otimista com Fail-Open (Setor):** Ao receber um alerta do sensor, o Broker do Setor realiza uma consulta de leitura (`ConsultarSaldo`) no peer local designado para balanceamento de carga (S1/S2 consultam Norte; S3/S4 consultam Sul, etc.).
+* *Mecanismo Fail-Open:* Se o peer local estiver offline, o Python captura o erro de conectividade e ativa a degradação graciosa: o alerta é encaminhado para as bases mesmo assim, impedindo que a falha de um único nó paralise a ingestão de dados.
 
-### PC 2 — Brokers de Base
-```bash
-docker compose -f docker/docker-compose.bases.yml up --build
-```
-Sobe 4 bases (Norte, Sul, Leste, Oeste) nas portas TCP 6001–6004 e UDP 6101–6104.
 
-### PC 3 — Drones 
-```bash
-docker compose -f docker/docker-compose.drones.yml up --build
-```
-Drones escutam TCP nas portas 7001 (Norte), 7011 (Sul), 7021 (Leste), 7031 (Oeste).
+2. **Débito Atômico e Bloqueio MVCC (Base):** Quando o cronômetro de prioridade TDMA de uma base zera, ela invoca a transação `AutorizarPagamento` no ledger **antes** de enviar o comando TCP ao drone.
+* O Hyperledger Fabric processa o débito do custo operacional (CRÍTICA = 3, ALTA = 2, BAIXA = 1 token). Se duas bases tentarem debitar simultaneamente o saldo de uma empresa que possui fundos para apenas uma missão, o mecanismo de **Multi-Version Concurrency Control (MVCC)** do Fabric detectará o conflito de leitura/escrita na versão da chave da carteira, validando apenas uma transação e invalidando a concorrente no momento do commit do bloco.
 
-### PC 4 - Sensores
-```bash
-docker compose -f docker/docker-compose.sensores.yml up --build
-```
 
-### Monitor (qualquer PC)
-```bash
-pip install websockets
-python monitor/monitor_bridge.py
-# Abra monitor/index.html no navegador e conecte em ws://localhost:8001
-```
-
-O painel também funciona sem o bridge (modo simulação automática) — basta abrir `index.html` diretamente no navegador.
 
 ---
 
-## Testes
+## 6. Proteção Avançada contra Duplo Despacho (Race Conditions)
 
-### Teste unitário — estado e concorrência do drone
-```bash
-python -m pytest teste/test_drone.py -v
-```
-Cobre: estado inicial `LIVRE`, ciclo `ocupar/liberar`, thread-safety com 10 threads simultâneas, mock de `tcp_enviar` no registro e na conclusão de missão.
+Uma falha clássica de redes P2P ocorre quando o broadcast de `ACEITE` de uma base atrasa devido à latência ou perda de pacotes, fazendo com que uma segunda base assuma a mesma missão erroneamente. O sistema neutraliza isso utilizando a blockchain como o **desempate central definitivo**:
 
-### Teste de exclusão mútua local (`teste/teste_concorrencia`)
-```bash
-python teste/teste_concorrencia
-```
-Dispara 20 threads simultâneas tentando aceitar a mesma requisição via `FilaReplicada.marcar_aceita()`. Valida que exatamente 1 aceite é registrado.
-
-### Teste de carga TCP (`teste/teste_stress.py`)
-```bash
-# Ajuste IP_PC_SETORES se necessário
-python teste/teste_stress.py
-```
-Envia 150 requisições TCP simultâneas para o broker S1 e reporta taxa de transferência e falhas de conexão. Necessita o sistema rodando.
+* Ao criar uma autorização, o chaincode grava uma chave única no estado mundial baseada no ID da requisição: `PAG_ + id_requisicao`.
+* Se o atraso de rede ocultar o estado de processamento operacional, e duas bases chamarem `AutorizarPagamento` para a mesma missão, a segunda chamada atingirá a chave existente.
+* O Smart Contract Go intercepta isso e retorna uma resposta padronizada contendo a flag `"ja_autorizado": true`.
+* O código Python da Base (`base/broker.py`), ao receber `"ja_autorizado": true`, verifica se aquela chamada faz parte de uma reemissão legítima (recuperação de drone caído via `is_reemissao`). Caso não seja, a Base identifica na fração de segundo que perdeu a corrida de consenso, cancela o acionamento e **aborta imediatamente o duplo-despacho**, preservando a frota.
 
 ---
 
-## Teste de Resiliência
+## 7. Log de Operações Imutável e Auditabilidade Visual
 
-### Teste 1 — Falha de broker de setor
+Ao término de cada missão, o drone retorna à base e o Broker invoca a função `RegistrarLaudo`.
 
-**Objetivo:** verificar que nenhum outro setor é impactado quando um broker cai.
-
-```bash
-# Derruba o broker do setor S3
-docker stop broker_s3
-
-# Verificar nos logs das bases que requisições de outros setores seguem sendo atendidas
-docker logs base_norte --follow
-```
-
-**Resultado obtido:**
-```
-10:42:31 [INFO] base — [NORTE] Req a1b2c3d4 recebida | setor S1 | Lamport=12 | timeout=0ms
-10:42:31 [INFO] base — [NORTE] Aceitando req a1b2c3d4 -> drone DRONE-NORTE-1
-10:42:31 [INFO] base — [NORTE] Drone DRONE-NORTE-1 despachado para req a1b2c3d4
-# broker_s3 derrubado — setores S1, S2, S4..S8 continuam sem interrupção
-10:42:45 [INFO] base — [NORTE] Req f9e8d7c6 recebida | setor S2 | Lamport=15 | timeout=0ms
-10:42:45 [INFO] base — [NORTE] Aceitando req f9e8d7c6 -> drone DRONE-NORTE-1
-```
-
-Nenhuma requisição de outros setores foi perdida. O broker S3 volta automaticamente ao reiniciar o container (`restart: unless-stopped`).
+* **Conteúdo Enriquecido do Laudo:** O laudo gravado na blockchain não contém apenas metadados. Ele crava no estado imutável o `id_requisicao`, `drone_id`, `base_id`, `setor_id`, `timestamp` Unix e os dados analíticos coletados pelo sensor no momento da falha: `tipo_ocorrencia` (ex: bloqueio de rota, embarcação à deriva) e a `criticidade`.
+* **Auditoria Visual Unificada:** O arquivo `monitor_bridge.py` foi transformado em um servidor WebSocket bidirecional assíncrono. Na aba **📊 Auditoria** do painel `index.html`, qualquer membro do consórcio pode selecionar uma empresa e realizar chamadas em tempo real à API do Fabric para auditar saldos e inspecionar o histórico completo de transações e hashes de blocos retornados pela função `GetHistoryForKey`, sem necessidade de acesso administrativo ao terminal.
 
 ---
 
-### Teste 2 — Falha de drone em missão
-
-**Objetivo:** verificar que o sistema detecta o drone perdido e recoloca a missão em fila.
-
-```bash
-# Identifique o drone em missão nos logs
-docker logs base_norte | grep "despachado"
-
-# Derruba o container do drone
-docker stop drone_norte
-
-# Aguarde HEARTBEAT_TIMEOUT segundos (padrão: 12s)
-docker logs base_norte | grep "PERDIDO"
-docker logs base_sul   | grep "REEMISSAO"
-```
-
-**Resultado obtido:**
-```
-10:51:03 [INFO]    base — [NORTE] Drone DRONE-NORTE-1 despachado para req 3c2b1a0f
-# docker stop drone_norte executado
-10:51:16 [WARNING] base — [NORTE] Drone DRONE-NORTE-1 marcado como PERDIDO.
-10:51:16 [INFO]    base — [NORTE] Broadcast de REEMISSAO para req 3c2b1a0f
-10:51:16 [INFO]    base — [SUL]   Req 3c2b1a0f recebida (REEMISSAO) | setor S5 | timeout=200ms
-10:51:16 [INFO]    base — [SUL]   Aceitando req 3c2b1a0f → drone DRONE-SUL-1
-10:51:16 [INFO]    base — [SUL]   Drone DRONE-SUL-1 despachado para req 3c2b1a0f
-```
-
-A requisição foi reassociada a outro drone em menos de 1 segundo após a detecção da perda.
-
----
-
-### Teste 3 — Carga simultânea
-
-**Objetivo:** verificar zero duplicatas e priorização correta sob alta carga.
-
-```bash
-# No monitor web (index.html), aba "Stress Test"
-# Configure: 50 alertas, taxa 10/s, distribuição mista
-# Clique "Iniciar Bombardeamento"
-# Observe zero duplicatas na fila e priorização correta
-
-# Ou via script direto (necessita sistema rodando):
-python teste/teste_stress.py
-```
-
-**Resultado obtido:** 50 alertas processados, 0 duplicatas detectadas, requisições `CRITICA` atendidas antes de `ALTA` e `BAIXA` em todos os ciclos observados.
-
----
-
-## Estrutura de Pastas
+## 8. Estrutura de Pastas Atualizada
 
 ```
 .
 ├── base/
-│   ├── broker.py           # Broker de base — exclusão mútua, despacho, tolerância a falhas
-│   ├── dockerfile          # Python 3.11-slim
-│   ├── fila_replicada.py   # FilaReplicada e InfoDrone (thread-safe)
-│   └── prioridade.py       # GerenciadorPrioridade — lê tabela e calcula timeouts
+│   ├── broker.py             # Garante fluxo Pré-pago, intercepta duplo-despacho via ledger
+│   ├── dockerfile            # Base com fabric-sdk-py pré-instalado
+│   └── fila_replicada.py     # Gerencia estados operacionais locais
+├── chaincode/
+│   └── token_contract.go     # Smart Contract em Go: MVCC, MSP-checks, idempotência avançada
 ├── config/
-│   └── prioridade_tabela.json   # Ordem de prioridade de cada setor → base
+│   └── custo_por_criticidade.json  # Tabela oficial de precificação de tokens
 ├── docker/
-│   ├── .env                     # Variáveis de ambiente — editar IPs antes de subir
-│   ├── docker-compose.bases.yml
-│   ├── docker-compose.drones.yml
-│   ├── docker-compose.sensores.yml
-│   └── docker-compose.setores.yml
-├── drone/
-│   ├── dockerfile          # Python 3.12-slim
-│   ├── drone.py            # Worker — registro, heartbeat UDP, execução de missão
-│   └── test_drone.py       # Testes unitários (copiado também em teste/)
+│   ├── .env                  # IPs das máquinas do laboratório e variáveis de ambiente
+│   └── docker-compose.fabric.yml   # Definição dos 3 orderers Raft, 4 peers e CLI do Fabric
+├── fabric/
+│   ├── configtx.yaml         # Perfil do canal e definição das organizações consorciais
+│   ├── crypto-config.yaml    # Configuração de geração de certificados MSP e TLS
+│   ├── connection-profile.json # Perfil de conexão lido pelo ledger_client.py
+│   ├── setup.sh              # Geração de artefatos, subida da rede e commit do chaincode com 2-de-4
+│   └── init_ledger.sh        # Gênese descentralizada de carteiras assinando por Org respectiva
 ├── monitor/
-│   ├── index.html          # Painel web — modo simulação + modo real via WebSocket
-│   └── monitor_bridge.py   # Bridge UDP:8000 → WebSocket:8001
-├── sensor/
-│   ├── dockerfile          # Python 3.12-slim
-│   └── sensor.py           # Gerador de alertas com pesos por tipo de ocorrência
-├── setor/
-│   ├── broker_setor.py     # Broker de setor — carimba Lamport, broadcast com retry
-│   └── dockerfile          # Python 3.12-slim
+│   ├── index.html            # UI com a aba Auditoria integrada para consultas e transferências P2P
+│   └── monitor_bridge.py     # API assíncrona bidirecional (WebSocket <-> gRPC Fabric)
 ├── shared/
-│   ├── constantes.py       # Enums: Criticidade, TipoOcorrencia, EstadoDrone, TipoMensagem…
-│   ├── lamport.py          # LamportClock thread-safe
-│   ├── mensagens.py        # Dataclasses de mensagens (Alerta, Requisicao, Heartbeat…)
-│   └── protocolo.py        # tcp_enviar, tcp_broadcast, udp_enviar, notificar_monitor…
+│   ├── ledger_client.py      # Wrapper nativo do fabric-sdk-py com tratamento de exceções de rede
+│   └── protocolo.py          # Utilitários de rede TCP/UDP
 └── teste/
-    ├── test_drone.py        # Testes unitários do drone (unittest + mock)
-    ├── teste_concorrencia   # Teste de exclusão mútua: 20 threads vs 1 requisição
-    └── teste_stress.py      # Teste de carga: 150 requisições TCP simultâneas
+    └── teste_duplo_concorrencia.py # Teste de estresse disparando débitos simultâneos contra MVCC
+
 ```
 
 ---
 
-## Variáveis de Ambiente Relevantes
+## 9. Guião Completo de Execução e Testes Práticos
 
-| Variável | Padrão | Onde é usada | Descrição |
-|---|---|---|---|
-| `HEARTBEAT_INTERVALO` | `3` | `drone.py` | Intervalo em segundos entre cada heartbeat UDP do drone |
-| `HEARTBEAT_TIMEOUT` | `12` | `base/broker.py` | Segundos sem heartbeat antes de declarar drone perdido |
-| `MISSAO_DURACAO_MIN` | `3` | `drone.py` | Duração mínima simulada de uma missão (segundos) |
-| `MISSAO_DURACAO_MAX` | `7` | `drone.py` | Duração máxima simulada de uma missão (segundos) |
-| `TIMEOUT_BASE_2` | `200` | `base/prioridade.py` | Timeout (ms) da base em 2ª prioridade |
-| `TIMEOUT_BASE_3` | `400` | `base/prioridade.py` | Timeout (ms) da base em 3ª prioridade |
-| `TIMEOUT_BASE_4` | `600` | `base/prioridade.py` | Timeout (ms) da base em 4ª prioridade |
-| `BROADCAST_MAX_TENTATIVAS` | `3` | `setor/broker_setor.py` | Tentativas de reenvio para bases offline |
-| `BROADCAST_RETRY_DELAY_S` | `1.0` | `setor/broker_setor.py` | Pausa em segundos entre tentativas de broadcast |
-| `MAX_TENTATIVAS` | `5` | `drone.py` | Tentativas de registro na base com exponential backoff |
-| `IP_MONITOR` | `127.0.0.1` | `shared/protocolo.py` | IP para onde eventos UDP do monitor são enviados |
+Para a apresentação de 30 minutos no laboratório da UEFS, execute os comandos exatamente nesta sequência para demonstrar a conformidade total com o barema:
+
+### Passo 1: Inicialização da Rede Blockchain (PC 2 - Servidor Fabric)
+
+Execute o script de infraestrutura para gerar a topologia Raft e aplicar a política de endosso de duas organizações:
+
+```bash
+bash fabric/setup.sh
+
+```
+
+*Validação para o professor:* Para provar que a política de 2 de 4 foi aplicada com sucesso, execute:
+
+```bash
+docker exec cli peer lifecycle chaincode querycommitted --channelID ormuz-channel --name token_contract
+
+```
+
+### Passo 2: Gênese Descentralizada dos Ativos (PC 2)
+
+Injete os tokens iniciais nas carteiras forçando a autenticação distribuída por organização dona:
+
+```bash
+bash fabric/init_ledger.sh
+
+```
+
+### Passo 3: Subida dos Componentes Operacionais
+
+Nos seus respectivos PCs do laboratório, suba os demais blocos do sistema:
+
+* **Bases (PC 2):** `docker compose -f docker/docker-compose.bases.yml up -d`
+* **Setores (PC 1):** `docker compose -f docker/docker-compose.setores.yml up -d`
+* **Drones (PC 3):** `docker compose -f docker/docker-compose.drones.yml up -d`
+
+### Passo 4: Conexão do Monitor de Auditoria
+
+Inicie o microsserviço da API de auditoria e abra o painel visual:
+
+```bash
+python monitor/monitor_bridge.py
+
+```
+
+Abra o arquivo `monitor/index.html` no navegador, vá à aba **Bridge**, clique em **Conectar**. Em seguida, navegue até a aba **📊 Auditoria** e clique em **Consultar todas no Fabric** para ver os saldos reais sincronizados diretamente da blockchain.
+
+---
+
+## 10. Demonstrações de Defesa Essenciais (Gabarito do Barema)
+
+### Prova 1: Teste de Resiliência e Tolerância a Falhas (Derrubada de Nós)
+
+Durante a arguição, o professor solicitará a derrubada de um nó para testar a robustez da rede.
+
+```bash
+# Desligue completamente o peer da organização Leste
+docker stop peer0.leste.ormuz.com
+
+```
+
+*Comportamento esperado:* Vá ao painel web e dispare um alerta para um setor controlado pela Base Leste. Como nossa política exige 2 de 4 assinaturas, as bases remanescentes (`Norte`, `Sul`, `Oeste`) coletarão os endossos entre si, fecharão o bloco com sucesso via Raft e o drone decolará normalmente. O sistema demonstra resiliência total a falhas de componentes.
+
+### Prova 2: Teste de Duplo Gasto e Concorrência Extrema
+
+Para validar a segurança das carteiras sob alta concorrência:
+
+1. Vá à aba **Stress Test** no monitor visual.
+2. Inicie um bombardeamento massivo de alertas simultâneos direcionados à mesma empresa pagante com fundos limitados.
+3. Inspecione o terminal de logs ou os logs do contêiner da base: os débitos excedentes serão rejeitados de forma limpa pelo MVCC do Fabric antes de gerar tráfego aéreo, emitindo o evento `PAGAMENTO_RECUSADO` diretamente no log distribuído do painel.

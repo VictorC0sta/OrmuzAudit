@@ -3,9 +3,16 @@ broker_setor.py — Componente Broker de Setor do sistema Ormuz Command Center.
 
 Papel na arquitetura:
     Atua como um roteador intermediário entre o Sensor do setor e as Bases.
-    Ele recebe os dados "brutos" do sensor, estampa um Timestamp Lógico (Lamport)
-    para garantir a ordenação dos eventos no sistema distribuído, e dispara
+    Ele recebe os dados "brutos" do sensor, VERIFICA a assinatura HMAC do
+    alerta (prova de que o empresa_id alegado é mesmo de quem mandou —
+    ver shared/auth.py), estampa um Timestamp Lógico (Lamport) para
+    garantir a ordenação dos eventos no sistema distribuído, e dispara
     essa requisição simultaneamente para todas as 4 bases.
+
+    A partir daqui (setor -> bases -> ledger), o empresa_id já passou pela
+    verificação de origem — não é assinado de novo em cada hop, porque essa
+    parte da rede é infraestrutura nossa, não entrada não confiável vinda
+    de fora.
 """
 
 import os
@@ -26,6 +33,7 @@ from protocolo import notificar_monitor, criar_servidor_tcp, tcp_receber_complet
 from constantes import TipoMensagem
 from mensagens import MensagemRequisicao
 from lamport import LamportClock
+from auth import verificar
 
 # ── Configuração de Logging ───────────────────────────────────────────────────
 
@@ -48,7 +56,6 @@ IP_BASE_SUL   = os.environ.get("IP_BASE_SUL",   "127.0.0.1")
 IP_BASE_LESTE = os.environ.get("IP_BASE_LESTE", "127.0.0.1")
 IP_BASE_OESTE = os.environ.get("IP_BASE_OESTE", "127.0.0.1")
 
-# Portas TCP onde as Bases escutam requisições
 PORTA_BASE_NORTE = int(os.environ.get("PORTA_BASE_NORTE", "6001"))
 PORTA_BASE_SUL   = int(os.environ.get("PORTA_BASE_SUL",   "6002"))
 PORTA_BASE_LESTE = int(os.environ.get("PORTA_BASE_LESTE", "6003"))
@@ -56,11 +63,8 @@ PORTA_BASE_OESTE = int(os.environ.get("PORTA_BASE_OESTE", "6004"))
 
 PRIORIDADE = os.environ.get("PRIORIDADE", "NORTE,SUL,LESTE,OESTE")
 
-# Configurações do mecanismo de tolerância a falhas de rede (Retry)
 BROADCAST_MAX_TENTATIVAS = int(os.environ.get("BROADCAST_MAX_TENTATIVAS", "3"))
 BROADCAST_RETRY_DELAY_S  = float(os.environ.get("BROADCAST_RETRY_DELAY_S", "1.0"))
-
-# ── Destinos de broadcast (todas as 4 bases) ──────────────────────────────────
 
 BASES: list[tuple[str, int]] = [
     (IP_BASE_NORTE, PORTA_BASE_NORTE),
@@ -69,72 +73,51 @@ BASES: list[tuple[str, int]] = [
     (IP_BASE_OESTE, PORTA_BASE_OESTE),
 ]
 
-
 _CAMINHO_CUSTO = os.path.join(os.path.dirname(__file__), "..", "config", "custo_por_criticidade.json")
 with open(_CAMINHO_CUSTO, "r", encoding="utf-8") as _f:
     _CUSTO_POR_CRIT = json.load(_f)
 
 def calcular_custo(criticidade: str) -> int:
     return _CUSTO_POR_CRIT.get(criticidade, {}).get("tokens", 1)
-# ── Instâncias Globais ────────────────────────────────────────────────────────
 
-# O Relógio de Lamport carimba cada nova requisição com um número sequencial,
-# permitindo que as bases saibam qual alerta aconteceu primeiro de forma global.
 clock = LamportClock()
-
 
 # ── Lógica de Rede e Tolerância a Falhas ──────────────────────────────────────
 
 def broadcast_com_retry(payload: dict) -> dict[str, bool]:
-    """
-    Envia a requisição para todas as bases garantindo entrega sob falhas leves.
-
-    Como funciona:
-    1. Tenta enviar para todas as 4 bases de uma vez.
-    2. Se alguma falhar (ex: base reiniciando), filtra apenas as que falharam.
-    3. Aguarda um delay e tenta reenviar SOMENTE para as que falharam.
-    4. O sistema continua operando mesmo se uma base ficar offline definitivamente.
-    """
     resultados_finais: dict[str, bool] = {}
     pendentes = list(BASES)
 
     for tentativa in range(1, BROADCAST_MAX_TENTATIVAS + 1):
         if not pendentes:
-            break  # Todas as bases receberam com sucesso
+            break 
 
-        # Envia em paralelo para a lista de pendentes
         parcial = tcp_broadcast(pendentes, payload)
         resultados_finais.update(parcial)
 
-        # Filtra as bases que retornaram False (falha de conexão)
         falhas = [(h, p) for (h, p) in pendentes if not parcial.get(f"{h}:{p}", False)]
-
         enviados = len(pendentes) - len(falhas)
+        
         logger.info(
             "[%s] Broadcast tentativa %d/%d — %d/%d bases alcançadas%s",
-            SETOR_ID, tentativa, BROADCAST_MAX_TENTATIVAS,
-            enviados, len(pendentes),
+            SETOR_ID, tentativa, BROADCAST_MAX_TENTATIVAS, enviados, len(pendentes),
             f" | {len(falhas)} offline, aguardando {BROADCAST_RETRY_DELAY_S}s para retry" if falhas else "",
         )
 
         if not falhas:
             break
 
-        # Prepara a próxima iteração apenas com as bases que falharam
         pendentes = falhas
         if tentativa < BROADCAST_MAX_TENTATIVAS:
             time.sleep(BROADCAST_RETRY_DELAY_S)
 
-    # Log de aviso caso esgotem as tentativas e alguma base continue offline
     if pendentes:
         logger.warning(
             "[%s] Bases não alcançadas após %d tentativas: %s",
-            SETOR_ID, BROADCAST_MAX_TENTATIVAS,
-            [f"{h}:{p}" for h, p in pendentes],
+            SETOR_ID, BROADCAST_MAX_TENTATIVAS, [f"{h}:{p}" for h, p in pendentes],
         )
 
     return resultados_finais
-
 
 # ── Processamento de Dados ────────────────────────────────────────────────────
 
@@ -145,7 +128,31 @@ def processar_alerta(msg: dict):
         logger.warning("[%s] Mensagem ignorada — tipo inesperado: %s", SETOR_ID, tipo)
         return
 
+    empresa_id = msg.get("empresa_id")
+
+    # ── VERIFICAÇÃO DE AUTENTICIDADE (HMAC) ──────────────────────────────
+    # Antes de qualquer outra coisa: este alerta realmente vem de quem diz
+    # ser? Se a assinatura não bater (empresa errada, segredo errado, ou
+    # qualquer campo alterado depois de assinado), rejeita aqui mesmo — o
+    # alerta nunca chega a virar uma cobrança no ledger.
+    if not verificar(
+        msg.get("setor_id", SETOR_ID), msg.get("tipo_ocorrencia"),
+        msg.get("criticidade"), empresa_id, msg.get("id_alerta"),
+        msg.get("assinatura"),
+    ):
+        logger.warning(
+            "[%s] Alerta REJEITADO — assinatura HMAC invalida (empresa_id=%s pode estar forjado)",
+            SETOR_ID, empresa_id,
+        )
+        notificar_monitor({
+            "tipo": "PAGAMENTO_RECUSADO", "setor": SETOR_ID, "empresa": empresa_id,
+            "motivo": "assinatura invalida — empresa_id nao autenticado",
+            "id_requisicao": msg.get("id_alerta", ""),
+        })
+        return
+
     ts = clock.incrementar()
+    custo = calcular_custo(msg.get("criticidade"))
 
     requisicao = MensagemRequisicao(
         id_setor=SETOR_ID,
@@ -155,23 +162,42 @@ def processar_alerta(msg: dict):
     )
 
     payload = asdict(requisicao)
+    payload["empresa_id"] = empresa_id 
 
     logger.info(
-        "[%s] Alerta recebido → req %s | %s [%s] | Lamport=%d",
-        SETOR_ID,
-        requisicao.id_requisicao[:8],
-        requisicao.tipo_ocorrencia,
-        requisicao.criticidade,
-        ts,
+        "[%s] Alerta autenticado → req %s | %s [%s] | empresa=%s | Lamport=%d",
+        SETOR_ID, requisicao.id_requisicao[:8], requisicao.tipo_ocorrencia, requisicao.criticidade, empresa_id, ts,
     )
 
-    # ── CORRIGIDO: removido id_transacao= (kwarg inexistente) ──
-    empresa_id = msg.get("empresa_id")
-    custo = calcular_custo(msg.get("criticidade"))
-    ok = ledger_client.debitar(empresa_id, custo, requisicao.id_requisicao)
-    if not ok:
-        logger.warning("[%s] Empresa %s sem saldo suficiente. Requisição rejeitada.", SETOR_ID, empresa_id)
+    # ── LOGICA DE PRÉ-FILTRAGEM COM FAIL-OPEN (DEGRADAÇÃO GRACIOSA) ──
+    # Se o ledger do Setor falhar (ex: peer offline), não derrubamos a missão.
+    # Repassamos para a Base, pois ela validará o saldo definitivamente antes de despachar.
+    saldo_atual, status_ledger = ledger_client.consultar_saldo(empresa_id)
+    
+    if status_ledger == "ERRO_REDE":
+        logger.warning("[%s] Ledger inacessível. Fail-open ativado: alerta encaminhado para validação definitiva pelas Bases.", SETOR_ID)
+        # Segue para o broadcast sem dar return!
+        
+    elif status_ledger == "NAO_ENCONTRADA" or saldo_atual is None:
+        motivo = "Empresa não está registrada no consórcio."
+        logger.warning("[%s] Requisição %s REJEITADA — %s", SETOR_ID, requisicao.id_requisicao[:8], motivo)
+        notificar_monitor({
+            "tipo": "PAGAMENTO_RECUSADO", "setor": SETOR_ID, "empresa": empresa_id,
+            "motivo": motivo, "id_requisicao": requisicao.id_requisicao
+        })
         return
+        
+    elif saldo_atual < custo:
+        motivo = f"Saldo insuficiente (Requer: {custo}, Atual: {saldo_atual})"
+        logger.warning("[%s] Requisição %s REJEITADA — %s", SETOR_ID, requisicao.id_requisicao[:8], motivo)
+        notificar_monitor({
+            "tipo": "PAGAMENTO_RECUSADO", "setor": SETOR_ID, "empresa": empresa_id,
+            "motivo": motivo, "id_requisicao": requisicao.id_requisicao
+        })
+        return
+        
+    else:
+        logger.info("[%s] Pré-filtragem OK. Saldo atual: %d tokens. Encaminhando para as bases...", SETOR_ID, saldo_atual)
 
     broadcast_com_retry(payload)
 
@@ -187,11 +213,6 @@ def processar_alerta(msg: dict):
 # ── Servidor TCP (Recepção dos Sensores) ──────────────────────────────────────
 
 def loop_servidor():
-    """
-    Inicia o servidor para escutar os alertas do Sensor local.
-    Usa um ThreadPoolExecutor para que, se dois sensores tentarem enviar dados 
-    exatamente no mesmo milissegundo, nenhum fique bloqueado esperando o outro.
-    """
     servidor = criar_servidor_tcp(MINHA_PORTA)
     logger.info(
         "[%s — %s] Broker iniciado na porta %d | prioridade: %s",
@@ -201,16 +222,12 @@ def loop_servidor():
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="alerta") as pool:
         while True:
             try:
-                # Fica travado aguardando uma conexão do sensor
                 conn, addr = servidor.accept()
-                # Delega o processamento da mensagem para uma thread livre no pool
                 pool.submit(_tratar_conexao, conn, addr)
             except Exception as e:
                 logger.error("[%s] Erro no accept: %s", SETOR_ID, e, exc_info=True)
 
-
 def _tratar_conexao(conn, addr):
-    """Lê a mensagem enviada pelo sensor, converte de JSON e processa."""
     try:
         msg = tcp_receber_completo(conn)
         conn.close()
@@ -222,24 +239,16 @@ def _tratar_conexao(conn, addr):
     except Exception as e:
         logger.error("[%s] Erro ao tratar conexão de %s: %s", SETOR_ID, addr, e, exc_info=True)
 
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    """Ponto de entrada do executável."""
     logger.info(
         "[%s] Inicializando broker | Bases: Norte=%s:%d Sul=%s:%d Leste=%s:%d Oeste=%s:%d | retry=%dx @ %.1fs",
-        SETOR_ID,
-        IP_BASE_NORTE, PORTA_BASE_NORTE,
-        IP_BASE_SUL,   PORTA_BASE_SUL,
-        IP_BASE_LESTE, PORTA_BASE_LESTE,
-        IP_BASE_OESTE, PORTA_BASE_OESTE,
-        BROADCAST_MAX_TENTATIVAS,
-        BROADCAST_RETRY_DELAY_S,
+        SETOR_ID, IP_BASE_NORTE, PORTA_BASE_NORTE, IP_BASE_SUL, PORTA_BASE_SUL,
+        IP_BASE_LESTE, PORTA_BASE_LESTE, IP_BASE_OESTE, PORTA_BASE_OESTE,
+        BROADCAST_MAX_TENTATIVAS, BROADCAST_RETRY_DELAY_S,
     )
-    # Trava a thread principal executando o servidor TCP
     loop_servidor()
-
 
 if __name__ == "__main__":
     main()
