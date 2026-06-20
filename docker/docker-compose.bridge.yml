@@ -1,0 +1,41 @@
+services:
+  monitor_bridge:
+    build:
+      context: ..
+      dockerfile: monitor/dockerfile
+    container_name: monitor_bridge
+    restart: unless-stopped
+    ports:
+      # WebSocket — o browser conecta aqui
+      - "8001:8001"
+      # UDP — os brokers de base enviam eventos aqui via notificar_monitor()
+      - "8000:8000/udp"
+    environment:
+      # O antídoto para o erro do Protobuf:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
+      
+      # NOME EXATO DA ORG NO JSON:
+      FABRIC_ORG_DOMAIN: "OrgNorte"
+      
+      FABRIC_USER: "Admin"
+      FABRIC_CHANNEL: "ormuz-channel"
+      FABRIC_CHAINCODE: "token_contract"
+      # Todos os peers para endosso (mesma política 2-de-4)
+      FABRIC_PEERS: "peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.leste.ormuz.com,peer0.oeste.ormuz.com"
+    volumes:
+      # Monta os certificados MSP
+      - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      # Monta o arquivo de perfil de conexão
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
+    networks:
+      # Rede interna compartilhada com as bases
+      - ormuz_net
+      # Rede do Hyperledger Fabric (peers e orderers)
+      - ormuz_fabric
+
+networks:
+  ormuz_net:
+    driver: bridge
+  ormuz_fabric:
+    external: true
+    name: docker_ormuz_fabric

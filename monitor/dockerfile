@@ -1,0 +1,31 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# fabric-sdk-py precisa do grpcio compilado — instala dependências de build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libssl-dev libffi-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    fabric-sdk-py \
+    websockets
+
+ENV PYTHONPATH="/app/shared"
+
+# Copia tudo que a bridge precisa
+COPY shared/ ./shared/
+COPY config/ ./config/
+COPY fabric/connection-profile.json ./fabric/connection-profile.json
+COPY monitor/ ./monitor/
+
+WORKDIR /app/monitor
+
+# WebSocket da bridge
+EXPOSE 8001
+# UDP do notificar_monitor()
+EXPOSE 8000/udp
+
+CMD ["python", "monitor_bridge.py"]
+
+

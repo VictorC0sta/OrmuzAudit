@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ormuz Command Center</title>
+    <title>Ormuz Command Center (Simulador Standalone)</title>
     <style>
     * { box-sizing: border-box; }
     body { margin: 0; background-color: #1e1e1e; color: #e0e0e0; }
@@ -82,22 +82,69 @@ const SECTOR_LAYOUT = [
   {id:"S3",col:0,row:1},{id:"S4",col:1,row:1},{id:"S7",col:2,row:1},{id:"S8",col:3,row:1}
 ];
 
-// Cada setor pertence a uma empresa — mesmo mapeamento do docker/.env
 const SECTOR_EMPRESA = {
   S1:"EMPRESA-A", S2:"EMPRESA-B", S3:"EMPRESA-C", S4:"EMPRESA-D",
   S5:"EMPRESA-E", S6:"EMPRESA-F", S7:"EMPRESA-G", S8:"EMPRESA-H"
 };
 const EMPRESAS = Object.values(SECTOR_EMPRESA);
-// Custo em tokens por criticidade — usado SÓ para exibir informação na aba
-// "Injetar Alerta" (espelha config/custo_por_criticidade.json). Esta tela
-// NUNCA debita nada: o pagamento real é validado pela Base no Hyperledger
-// Fabric, e só aparece aqui quando consultado de verdade na aba Auditoria.
 const CUSTO_POR_CRIT = {CRITICA:3, ALTA:2, BAIXA:1};
 
 let _uid=0;
 const uid = () => `R${++_uid}`;
 let lamportClock = 0;
 const incLamport = () => ++lamportClock;
+
+// ── MOCK DO LEDGER INTERNO (Simula o Hyperledger Fabric) ───────────────
+const JS_LEDGER = {
+  carteiras: {},
+  pagamentos: new Set(),
+  laudos: new Set(),
+  auditoria: {}
+};
+
+// Inicializa o ledger (Gênese)
+EMPRESAS.forEach(emp => {
+  JS_LEDGER.carteiras[emp] = 200;
+  JS_LEDGER.auditoria[emp] = [{
+    tx_id: Math.random().toString(36).substr(2, 10),
+    timestamp: new Date().toISOString().replace('T',' ').slice(0,19),
+    saldo_momento: 200
+  }];
+});
+
+function fakeTxId() { return Math.random().toString(36).substr(2, 12); }
+function fakeTimestamp() { return new Date().toISOString().replace('T',' ').slice(0,19); }
+
+function ledger_autorizarPagamento(idReq, empresa, custo) {
+  const chave = `PAG_${idReq}`;
+  if(JS_LEDGER.pagamentos.has(chave)) return {sucesso:true, motivo:"pagamento ja autorizado", saldo_restante:JS_LEDGER.carteiras[empresa]};
+  if(JS_LEDGER.carteiras[empresa] < custo) return {sucesso:false, motivo:"saldo insuficiente"};
+  
+  JS_LEDGER.carteiras[empresa] -= custo;
+  JS_LEDGER.pagamentos.add(chave);
+  const saldo = JS_LEDGER.carteiras[empresa];
+  
+  JS_LEDGER.auditoria[empresa].unshift({ tx_id: fakeTxId(), timestamp: fakeTimestamp(), saldo_momento: saldo });
+  return {sucesso:true, motivo:"OK", saldo_restante: saldo};
+}
+
+function ledger_registrarLaudo(idReq) {
+  const chave = `PAG_${idReq}`;
+  if(!JS_LEDGER.pagamentos.has(chave)) return false;
+  JS_LEDGER.laudos.add(idReq);
+  return true;
+}
+
+function ledger_transferir(origem, destino, valor) {
+  if(JS_LEDGER.carteiras[origem] < valor) return {sucesso:false, motivo:"saldo insuficiente na origem"};
+  JS_LEDGER.carteiras[origem] -= valor;
+  JS_LEDGER.carteiras[destino] += valor;
+  
+  JS_LEDGER.auditoria[origem].unshift({ tx_id: fakeTxId(), timestamp: fakeTimestamp(), saldo_momento: JS_LEDGER.carteiras[origem] });
+  JS_LEDGER.auditoria[destino].unshift({ tx_id: fakeTxId(), timestamp: fakeTimestamp(), saldo_momento: JS_LEDGER.carteiras[destino] });
+  return {sucesso:true, motivo:"Transferencia efetuada"};
+}
+// ────────────────────────────────────────────────────────────────────────
 
 let STATE = {
   drones: [
@@ -116,18 +163,8 @@ let STATE = {
   bombCfg: {count:20,rate:3,sectors:"all",criticidade:"mixed"},
   newDrone: {id:"",base:"NORTE",port:7100},
   injectForm: {sector:"S1",tipo:"embarcacao_perigo"},
-  // IMPORTANTE: desligado por padrão. O painel não deve gerar tráfego
-  // "fantasma" sozinho — a simulação de fila/prioridade abaixo é só uma
-  // ferramenta didática que o usuário aciona explicitamente.
   autoSim: false,
-  wsUrl: "ws://localhost:8001",
-  wsStatus: "sim", // "sim" = desconectado da bridge | "connected" | "error"
-  wsObj: null,
-  // ── Dados financeiros: SOMENTE vindos do Fabric real via bridge ──────────
-  // Não existe aqui nenhum saldo, transação ou laudo fictício. Enquanto não
-  // houver uma consulta real respondida pela bridge, estes objetos ficam
-  // vazios e a aba Auditoria mostra isso de forma explícita — nada de número
-  // inventado fingindo ser dado do ledger.
+  
   saldosReais: {},
   auditoriaReal: {},
   auditFiltroEmpresa: "EMPRESA-A",
@@ -138,7 +175,12 @@ let STATE = {
 let bombTimer = null;
 let autoSimTimer = null;
 
-// ── Fila e prioridade ───────────────────────────────────────────────────────
+// Pré-carrega saldos iniciais para a interface
+EMPRESAS.forEach(emp => {
+  STATE.saldosReais[emp] = {saldo: 200, status: "OK"};
+  STATE.auditoriaReal[emp] = JS_LEDGER.auditoria[emp];
+});
+
 function sortByPriority(q) {
   return [...q].sort((a,b)=>{
     const pa=CRIT_PESO[a.crit]||1, pb=CRIT_PESO[b.crit]||1;
@@ -154,11 +196,7 @@ function log(msg, level="info") {
   if(STATE.events.length>200) STATE.events.length=200;
 }
 
-// ── Simulação OFFLINE de fila/prioridade/timeout ────────────────────────────
-// Isto demonstra apenas o algoritmo de exclusão mútua por janela de tempo
-// (TDMA) do Problema 2 — quem aceita primeiro de acordo com a prioridade do
-// setor. NÃO move nenhum token e NÃO escreve nada no ledger. O pagamento de
-// verdade só existe no Hyperledger Fabric e só aparece na aba Auditoria.
+// O Coração da Simulação Distribuída
 function processQueue() {
   const pending = STATE.queue.filter(r=>r.status==="PENDENTE");
   if(!pending.length) return;
@@ -168,23 +206,47 @@ function processQueue() {
 
   const req = sorted[0];
   const ts = lamportClock;
+  const custo = CUSTO_POR_CRIT[req.crit];
+
+  // 1. Tenta autorizar o pagamento no Ledger Falso
+  const autorizacao = ledger_autorizarPagamento(req.id, req.empresa, custo);
+  
+  if(!autorizacao.sucesso) {
+    req.status = "REJEITADA";
+    log(`✕ Pagamento recusado (Ledger Local): ${autorizacao.motivo} [Req: ${req.id.slice(0,5)}]`, "warn");
+    setTimeout(processQueue, 100);
+    render();
+    return;
+  }
+
+  // Se pagou, atualiza a interface
+  STATE.saldosReais[req.empresa] = {saldo: autorizacao.saldo_restante, status: "OK"};
+  STATE.auditoriaReal[req.empresa] = JS_LEDGER.auditoria[req.empresa];
+  log(`💰 Pagamento confirmado no Ledger: ${req.empresa} debitada em ${custo}tk (Restante: ${autorizacao.saldo_restante}tk)`, "success");
+
+  // 2. Despacha o Drone
   req.status = "ACEITA";
   req.drone  = free.id;
   free.state = "OCUPADO";
   free.mission = req.id;
-  log(`[${free.base}] Aceitou ${req.id} → ${free.id.replace("DRONE-","")} | L=${ts} (simulação local de fila/prioridade — não é o ledger real)`,"success");
+  log(`[${free.base}] Aceitou ${req.id} → ${free.id.replace("DRONE-","")} | L=${ts}`,"info");
   STATE.stats.aceitas++;
 
   const dur = 8000 + Math.random()*12000;
   const capturedDrone = free;
   const capturedReq   = req;
+  
+  // 3. Conclui a Missão
   setTimeout(()=>{
     if(capturedDrone.state === "OCUPADO") {
       capturedDrone.state = "LIVRE";
       capturedDrone.mission = null;
       capturedReq.status = "CONCLUIDA";
       STATE.stats.concluidas++;
-      log(`✓ Missão ${capturedReq.id} concluída por ${capturedDrone.id.replace("DRONE-","")} (o laudo de verdade fica no Hyperledger, não nesta simulação)`,"success");
+      
+      ledger_registrarLaudo(capturedReq.id);
+      
+      log(`✓ Missão ${capturedReq.id} concluída por ${capturedDrone.id.replace("DRONE-","")}. Laudo Registrado no Ledger.`,"success");
       setTimeout(processQueue,100);
       render();
     }
@@ -268,10 +330,7 @@ function killDrone(droneId) {
 function reviveDrone(droneId) {
   const d=STATE.drones.find(x=>x.id===droneId);
   if(!d) return;
-  if(!STATE.bases[d.base]) {
-    log(`Drone ${droneId.replace("DRONE-","")} não pode reviver — base ${d.base} offline`,"warn");
-    render(); return;
-  }
+  if(!STATE.bases[d.base]) return;
   d.state="LIVRE"; d.mission=null;
   log(`Drone ${droneId.replace("DRONE-","")} reconectado`,"success");
   setTimeout(()=>{processQueue();render();},200);
@@ -280,7 +339,6 @@ function reviveDrone(droneId) {
 
 function removeDrone(droneId) {
   STATE.drones=STATE.drones.filter(d=>d.id!==droneId);
-  log(`Drone ${droneId.replace("DRONE-","")} removido`,"warn");
   render();
 }
 
@@ -292,11 +350,10 @@ function killBase(baseId) {
     if(d.mission){
       const req=STATE.queue.find(r=>r.id===d.mission);
       if(req){req.status="PENDENTE";req.drone=null;}
-      log(`Missao ${d.mission} devolvida — base ${baseId} caiu`,"info");
       d.mission=null;
     }
   });
-  log(`⚠ Base ${baseId} DESATIVADA — todos os drones offline`,"warn");
+  log(`⚠ Base ${baseId} DESATIVADA`,"warn");
   setTimeout(()=>{processQueue();render();},300);
   render();
 }
@@ -304,57 +361,34 @@ function killBase(baseId) {
 function reviveBase(baseId) {
   if(STATE.bases[baseId]) return;
   STATE.bases[baseId] = true;
-  STATE.drones.filter(d=>d.base===baseId && d.state==="PERDIDO")
-    .forEach(d=>{d.state="LIVRE"; d.mission=null;});
-  log(`✔ Base ${baseId} RESTAURADA — drones reconectados`,"success");
+  STATE.drones.filter(d=>d.base===baseId && d.state==="PERDIDO").forEach(d=>{d.state="LIVRE"; d.mission=null;});
+  log(`✔ Base ${baseId} RESTAURADA`,"success");
   setTimeout(()=>{processQueue();render();},200);
   render();
 }
 
-function connectWs() {
-  try {
-    const ws=new WebSocket(STATE.wsUrl);
-    ws.onopen=()=>{STATE.wsStatus="connected";log(`Conectado: ${STATE.wsUrl}`,"success");render();};
-    ws.onmessage=(e)=>{
-      try{
-        const m=JSON.parse(e.data);
-        if(m.tipo==="DRONE_DESPACHADO") log(`[${m.base}] ${m.drone} → Setor ${m.setor}`,"success");
-        else if(m.tipo==="MISSAO_CONCLUIDA") log(`Missão concluída: drone ${m.drone}`,"success");
-        else if(m.tipo==="ALERTA_GERADO") injectAlert(m.setor, m.tipo_ocorrencia||"anomalia_menor", m.criticidade);
-        else if(m.tipo==="PAGAMENTO_RECUSADO") log(`✕ Pagamento recusado pelo ledger real: ${m.motivo}`,"warn");
-        // Respostas reais do Fabric, vindas da bridge bidirecional —
-        // são a ÚNICA fonte de dados financeiros mostrada nesta aplicação.
-        else if(m.tipo_resposta==="SALDO") {
-          STATE.saldosReais[m.empresa] = {saldo:m.saldo, status:m.status};
-          log(`[Fabric] Saldo ${m.empresa}: ${m.saldo ?? "N/D"} (status: ${m.status})`,"info");
-        } else if(m.tipo_resposta==="AUDITORIA") {
-          STATE.auditoriaReal[m.empresa] = m.transacoes || [];
-          log(`[Fabric] Auditoria ${m.empresa}: ${(m.transacoes||[]).length} transações`,"info");
-        } else if(m.tipo_resposta==="TRANSFERENCIA") {
-          STATE.ultimaTransferencia = {sucesso:m.sucesso, motivo:m.motivo};
-          if(m.sucesso) log(`[Fabric] Transferência confirmada no ledger real`,"success");
-          else log(`[Fabric] Transferência negada: ${m.motivo}`,"warn");
-        }
-        else {
-          console.log(`[Bridge] Tipo de mensagem desconhecido: ${m.tipo || m.tipo_resposta}`);
-        }
-        render();
-      }catch(e2){}
-    };
-    ws.onerror=()=>{STATE.wsStatus="error";render();};
-    ws.onclose=()=>{STATE.wsStatus="sim";log("Desconectado do sistema real","warn");render();};
-    STATE.wsObj=ws;
-    render();
-  }catch(e){STATE.wsStatus="error";log("Falha: "+e.message,"warn");render();}
-}
-
-// Envia uma chamada para o Fabric real via WebSocket bidirecional (monitor_bridge.py)
+// Simulador das chamadas de Transferência e Consulta que viriam da Bridge
 function chamarFabric(payload) {
-  if(STATE.wsStatus!=="connected" || !STATE.wsObj) {
-    log("Bridge não conectada. Use a aba Bridge para conectar ao sistema real.","warn");
-    render(); return;
-  }
-  STATE.wsObj.send(JSON.stringify(payload));
+  setTimeout(() => {
+    if(payload.tipo === 'GET_SALDO') {
+      STATE.saldosReais[payload.empresa] = {saldo: JS_LEDGER.carteiras[payload.empresa], status: "OK"};
+    } else if(payload.tipo === 'TRANSFERIR') {
+      const res = ledger_transferir(payload.origem, payload.destino, payload.valor);
+      STATE.ultimaTransferencia = res;
+      if(res.sucesso) {
+        log(`[Fabric] Transferência confirmada no Ledger Local`, "success");
+        STATE.saldosReais[payload.origem] = {saldo: JS_LEDGER.carteiras[payload.origem], status: "OK"};
+        STATE.saldosReais[payload.destino] = {saldo: JS_LEDGER.carteiras[payload.destino], status: "OK"};
+        STATE.auditoriaReal[payload.origem] = JS_LEDGER.auditoria[payload.origem];
+        STATE.auditoriaReal[payload.destino] = JS_LEDGER.auditoria[payload.destino];
+      } else {
+        log(`[Fabric] Transferência negada: ${res.motivo}`, "warn");
+      }
+    } else if(payload.tipo === 'GET_AUDITORIA') {
+      STATE.auditoriaReal[payload.empresa] = JS_LEDGER.auditoria[payload.empresa];
+    }
+    render();
+  }, 150);
 }
 
 function startAutoSim() {
@@ -383,7 +417,7 @@ function renderMap() {
   const totalH=mY*2+2*sH+gY;
   const pendByS={},actByS={};
   STATE.queue.forEach(r=>{
-    if(r.status==="PENDENTE") pendByS[r.sector]=(pendByS[r.sector]||0)+1;
+    if(r.status==="PENDENTE" || r.status==="REJEITADA") pendByS[r.sector]=(pendByS[r.sector]||0)+1;
     if(r.status==="ACEITA") actByS[r.sector]=r.crit;
   });
   let sectors="",dronePts="";
@@ -395,9 +429,6 @@ function renderMap() {
     const strMap={danger:"var(--color-border-danger)",warning:"var(--color-border-warning)",info:"var(--color-border-info)",none:"var(--color-border-secondary)"};
     const prio=(PRIORITY_TABLE[id]||[]).map(b=>b[0]).join(">");
     const emp=SECTOR_EMPRESA[id]||"";
-    // Saldo SÓ aparece se já tiver sido consultado de verdade no Fabric
-    // (via aba Auditoria/Bridge). Sem consulta real, mostra "—" — nunca um
-    // número inventado.
     const infoSaldo=STATE.saldosReais[emp];
     const saldoLabel=infoSaldo && infoSaldo.saldo!=null ? `${infoSaldo.saldo}tk` : "—";
     const saldoColor=!infoSaldo?"var(--color-text-tertiary)":(infoSaldo.saldo<10?"var(--color-text-danger)":infoSaldo.saldo<50?"var(--color-text-warning)":"var(--color-text-tertiary)");
@@ -462,11 +493,11 @@ function renderDroneCard(d) {
 }
 
 function renderQueueItem(r) {
-  const done=r.status==="CONCLUIDA";
+  const done=r.status==="CONCLUIDA" || r.status==="REJEITADA";
   const active=r.status==="ACEITA";
-  const bg=active?"var(--color-background-info)":"var(--color-background-primary)";
-  const statusLabel=r.status==="PENDENTE"?"PEND":r.status==="ACEITA"?"ATIVO":"OK";
-  const statusColor=r.status==="PENDENTE"?"var(--color-text-warning)":r.status==="ACEITA"?"var(--color-text-info)":"var(--color-text-tertiary)";
+  const bg=active?"var(--color-background-info)":r.status==="REJEITADA"?"var(--color-background-danger)":"var(--color-background-primary)";
+  const statusLabel=r.status==="PENDENTE"?"PEND":r.status==="ACEITA"?"ATIVO":r.status==="REJEITADA"?"REJEITADO":"OK";
+  const statusColor=r.status==="PENDENTE"?"var(--color-text-warning)":r.status==="ACEITA"?"var(--color-text-info)":r.status==="REJEITADA"?"var(--color-text-danger)":"var(--color-text-tertiary)";
   return `<div style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:var(--border-radius-md);background:${bg};border:0.5px solid var(--color-border-tertiary);margin-bottom:3px;opacity:${done?"0.5":"1"}">
     <div style="width:7px;height:7px;border-radius:50%;flex-shrink:0;background:${done?"var(--color-text-tertiary)":c_crit(r.crit)}"></div>
     <span class="mono" style="font-size:11px;font-weight:500;min-width:22px;color:var(--color-text-primary)">${r.sector}</span>
@@ -477,38 +508,18 @@ function renderQueueItem(r) {
   </div>`;
 }
 
-// ─── Aba Auditoria — cliente puro do Fabric real (sem dados inventados) ───
 function renderAuditoria() {
-  const conectado = STATE.wsStatus === "connected";
-
-  if (!conectado) {
-    return `
-    <div style="text-align:center;padding:30px 16px;background:var(--color-background-primary);border:0.5px solid var(--color-border-warning);border-radius:var(--border-radius-md)">
-      <div style="font-size:26px;margin-bottom:8px">🔌</div>
-      <div style="font-size:13px;font-weight:500;color:var(--color-text-warning);margin-bottom:6px">Não conectado ao Hyperledger Fabric</div>
-      <div style="font-size:12px;color:var(--color-text-secondary);max-width:380px;margin:0 auto 14px;line-height:1.5">
-        Esta aba só existe para mostrar dados <strong>reais</strong> — saldos, transferências e histórico vindos do ledger
-        distribuído via <span class="mono">monitor_bridge.py</span>. Não há simulação financeira local: sem conexão, não há
-        nada auditável para exibir aqui.
-      </div>
-      <button onclick="STATE.tab='bridge';render()" style="padding:8px 16px;font-weight:500;background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info)22">
-        Ir para a aba Bridge e conectar
-      </button>
-    </div>`;
-  }
-
   const tf = STATE.transferForm;
-
   return `
-  <div style="margin-bottom:10px;padding:8px 10px;background:var(--color-background-success);border:0.5px solid var(--color-border-success);border-radius:var(--border-radius-md);font-size:11px;color:var(--color-text-success)">
-    🔗 Conectado — os dados abaixo vêm de consultas reais ao chaincode <span class="mono">token_contract</span> no canal <span class="mono">ormuz-channel</span>.
+  <div style="margin-bottom:10px;padding:8px 10px;background:var(--color-background-info);border:0.5px solid var(--color-border-info);border-radius:var(--border-radius-md);font-size:11px;color:var(--color-text-info)">
+    💻 Modo Standalone: Todos os dados abaixo estão sendo calculados e atualizados instantaneamente pelo Simulador JS.
   </div>
 
   <div style="margin-bottom:12px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <span style="font-size:12px;font-weight:500;color:var(--color-text-primary)">Saldos (ConsultarSaldo)</span>
+      <span style="font-size:12px;font-weight:500;color:var(--color-text-primary)">Saldos Simulados em Tempo Real</span>
       <button onclick="EMPRESAS.forEach(e=>chamarFabric({tipo:'GET_SALDO',empresa:e}))" style="font-size:11px;padding:4px 10px;color:var(--color-text-info);border-color:var(--color-border-info)44">
-        🔄 Consultar todas no Fabric
+        🔄 Consultar
       </button>
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
@@ -527,7 +538,7 @@ function renderAuditoria() {
   </div>
 
   <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px;margin-bottom:12px">
-    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--color-text-primary)">Transferência de Tokens (TransferirTokens)</div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--color-text-primary)">Transferência de Tokens</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:6px;margin-bottom:8px">
       <div>
         <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:3px">Origem</div>
@@ -547,7 +558,7 @@ function renderAuditoria() {
       </div>
     </div>
     <button onclick="chamarFabric({tipo:'TRANSFERIR',origem:STATE.transferForm.origem,destino:STATE.transferForm.destino,valor:STATE.transferForm.valor})" style="width:100%;padding:7px;font-weight:500;background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info)22">
-      🔗 Executar Transferência no Fabric Real
+      🔗 Executar Transferência
     </button>
     ${STATE.ultimaTransferencia ? `<div style="margin-top:8px;font-size:11px;color:${STATE.ultimaTransferencia.sucesso?"var(--color-text-success)":"var(--color-text-danger)"}">
       ${STATE.ultimaTransferencia.sucesso ? "✓" : "✕"} ${STATE.ultimaTransferencia.motivo}
@@ -556,7 +567,7 @@ function renderAuditoria() {
 
   <div style="margin-bottom:8px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <span style="font-size:12px;font-weight:500;color:var(--color-text-primary)">Auditoria (AuditoriaEmpresa — GetHistoryForKey)</span>
+      <span style="font-size:12px;font-weight:500;color:var(--color-text-primary)">Auditoria (Log Imutável Simulado)</span>
     </div>
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <select onchange="STATE.auditFiltroEmpresa=this.value;render()" style="flex:1">
@@ -569,8 +580,7 @@ function renderAuditoria() {
     <div class="scroll" style="max-height:240px">
       ${(() => {
         const txs = STATE.auditoriaReal[STATE.auditFiltroEmpresa];
-        if (!txs) return `<div style="text-align:center;padding:16px;color:var(--color-text-tertiary);font-size:12px">Nenhuma consulta feita ainda para ${STATE.auditFiltroEmpresa}.</div>`;
-        if (txs.length === 0) return `<div style="text-align:center;padding:16px;color:var(--color-text-tertiary);font-size:12px">Sem histórico registrado no ledger para ${STATE.auditFiltroEmpresa}.</div>`;
+        if (!txs || txs.length === 0) return `<div style="text-align:center;padding:16px;color:var(--color-text-tertiary);font-size:12px">Sem histórico registrado.</div>`;
         return txs.map(tx => `<div style="display:flex;justify-content:space-between;padding:5px 8px;background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);margin-bottom:3px;font-size:11px">
           <span class="mono" style="color:var(--color-text-tertiary)">${tx.tx_id ? tx.tx_id.slice(0,10) : "?"}</span>
           <span style="color:var(--color-text-secondary)">${tx.timestamp ?? ""}</span>
@@ -582,7 +592,6 @@ function renderAuditoria() {
   `;
 }
 
-// ─── renderTabContent ──────────────────────────────────────────────────────
 function renderTabContent() {
   const f=STATE.injectForm;
   const crit=TIPO_CRIT[f.tipo];
@@ -592,7 +601,7 @@ function renderTabContent() {
   const pct=STATE.bombTotal>0?Math.round(STATE.bombSent/STATE.bombTotal*100):0;
 
   if(STATE.tab==="inject") return `
-    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Simule um sensor enviando um alerta para todas as bases. A base com maior prioridade responderá mais rápido. (Isto é uma simulação local do algoritmo de fila/prioridade — não debita créditos nem escreve no ledger.)</p>
+    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Simule um sensor enviando um alerta para todas as bases.</p>
     <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Setor de ocorrência</label>
     <select onchange="STATE.injectForm.sector=this.value;render()" style="width:100%">
       ${["S1","S2","S3","S4","S5","S6","S7","S8"].map(s=>`<option value="${s}" ${f.sector===s?"selected":""}>${s} — empresa: ${SECTOR_EMPRESA[s]} | 1ª prio: ${PRIORITY_TABLE[s][0]}</option>`).join("")}
@@ -602,10 +611,9 @@ function renderTabContent() {
       ${TIPOS.map(t=>`<option value="${t}" ${f.tipo===t?"selected":""}>${t.replace(/_/g," ")} [${TIPO_CRIT[t]}]</option>`).join("")}
     </select></div>
     <div style="padding:10px;border-radius:var(--border-radius-md);background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);margin-bottom:10px;font-size:11px">
-      <div>Empresa pagante: <strong style="color:var(--color-text-info)">${SECTOR_EMPRESA[f.sector]}</strong> · Custo desta missão: <strong style="color:${c_crit(crit)}">${CUSTO_POR_CRIT[crit]} token(s)</strong></div>
+      <div>Empresa pagante: <strong style="color:var(--color-text-info)">${SECTOR_EMPRESA[f.sector]}</strong> · Custo: <strong style="color:${c_crit(crit)}">${CUSTO_POR_CRIT[crit]} token(s)</strong></div>
       <div style="margin-top:3px">Prioridade: <strong style="color:var(--color-text-success)">${prio[0]}</strong> &gt; ${prio[1]} &gt; ${prio[2]} &gt; ${prio[3]}</div>
       <div style="margin-top:3px">Timeouts: <span class="mono">0ms / 200ms / 400ms / 600ms</span></div>
-      <div style="margin-top:6px;color:var(--color-text-tertiary)">O pagamento de verdade é validado pela Base no Hyperledger Fabric — esta tela não move créditos.</div>
     </div>
     <button onclick="injectAlert(STATE.injectForm.sector,STATE.injectForm.tipo,'${crit}')" style="width:100%;padding:9px;font-weight:500;background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info)22">
       Enviar Alerta → Broadcast para 4 Bases
@@ -616,7 +624,7 @@ function renderTabContent() {
     </div>`;
 
   if(STATE.tab==="stress") return `
-    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Teste de carga: bombardeie a simulação local com alertas simultâneos e observe a priorização e exclusão mútua na fila/drones. (Validação de saldo/pagamento real não faz parte desta simulação offline — isso é testado de verdade na aba Auditoria, conectado ao Fabric.)</p>
+    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Teste de carga: bombardeie a simulação local com alertas simultâneos.</p>
     <div style="margin-bottom:8px">
       <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"><span>Número de alertas</span><span class="mono">${bc.count}</span></div>
       <input type="range" min="5" max="100" step="5" value="${bc.count}" ${STATE.bombarding?"disabled":""} oninput="STATE.bombCfg.count=+this.value;render()">
@@ -701,34 +709,24 @@ function renderTabContent() {
   if(STATE.tab==="audit") return renderAuditoria();
 
   if(STATE.tab==="bridge") return `
-    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">Conecte ao sistema Python real. O broker envia eventos UDP na porta 8000 via <span class="mono">notificar_monitor()</span>. A bridge bidirecional também encaminha chamadas ao Hyperledger Fabric — é a ÚNICA fonte de dados financeiros usada na aba Auditoria.</p>
-    <div style="margin-bottom:8px"><label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">URL WebSocket</label>
-    <input type="text" value="${STATE.wsUrl}" oninput="STATE.wsUrl=this.value"></div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <div style="width:8px;height:8px;border-radius:50%;background:${STATE.wsStatus==="connected"?"var(--color-text-success)":STATE.wsStatus==="error"?"var(--color-text-danger)":"var(--color-text-tertiary)"}"></div>
-      <span style="font-size:12px;color:var(--color-text-secondary)">${STATE.wsStatus==="connected"?"Conectado ao sistema real":STATE.wsStatus==="error"?"Erro de conexão":"Desconectado (modo simulação de fila/prioridade apenas)"}</span>
+    <p style="margin:0 0 10px;font-size:12px;color:var(--color-text-secondary)">A conexão com a Bridge foi substituída pelo Motor de Simulação Integrado.</p>
+    <div style="margin-bottom:12px;padding:12px;background:var(--color-background-info);border:0.5px solid var(--color-border-info);border-radius:var(--border-radius-md)">
+      <div style="font-size:14px;font-weight:500;color:var(--color-text-info);margin-bottom:6px">💻 Modo Simulador Standalone</div>
+      <div style="font-size:11px;color:var(--color-text-primary);line-height:1.5">
+        Esta versão não precisa do Python nem do Docker para funcionar. A exclusão mútua e as regras do <strong>Hyperledger Fabric</strong> (saldo, auditoria, transferências) estão embutidas no próprio JavaScript da página.
+      </div>
     </div>
-    <button onclick="${STATE.wsStatus==="connected"?"STATE.wsObj&&STATE.wsObj.close()":"connectWs()"}" style="width:100%;padding:9px;font-weight:500;margin-bottom:12px;background:${STATE.wsStatus==="connected"?"var(--color-background-danger)":"var(--color-background-success)"};color:${STATE.wsStatus==="connected"?"var(--color-text-danger)":"var(--color-text-success)"};border-color:transparent">
-      ${STATE.wsStatus==="connected"?"Desconectar":"Conectar ao Sistema Real"}
-    </button>
-    <div style="font-size:12px;font-weight:500;margin-bottom:6px">monitor_bridge.py (versão bidirecional com Fabric):</div>
-    <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px">
-<pre># Execute: python monitor/monitor_bridge.py
-# Requer: pip install websockets
-# A versao bidirecional encaminha chamadas
-# GET_SALDO / GET_AUDITORIA / TRANSFERIR
-# direto para o Hyperledger Fabric via ledger_client.py</pre></div>`;
+  `;
 
   return "";
 }
 
-// ─── RENDER principal ──────────────────────────────────────────────────────
 function render() {
   const S=STATE;
   S.lamport=lamportClock;
 
   const qSorted=[...S.queue].sort((a,b)=>{
-    const ord={PENDENTE:0,ACEITA:1,CONCLUIDA:2};
+    const ord={PENDENTE:0,ACEITA:1,CONCLUIDA:2,REJEITADA:3};
     if(ord[a.status]!==ord[b.status]) return ord[a.status]-ord[b.status];
     return (CRIT_PESO[b.crit]||1)-(CRIT_PESO[a.crit]||1);
   }).slice(0,30);
@@ -737,21 +735,20 @@ function render() {
   const actN=S.queue.filter(r=>r.status==="ACEITA").length;
   const freeN=S.drones.filter(d=>d.state==="LIVRE"&&S.bases[d.base]).length;
   const onlineBases=Object.values(S.bases).filter(Boolean).length;
-  const conectado = S.wsStatus === "connected";
 
   const tabs=[
     {k:"inject",l:"Injetar Alerta"},
     {k:"stress",l:"Stress Test"},
     {k:"drone",l:"Drones & Bases"},
     {k:"audit",l:"📊 Auditoria"},
-    {k:"bridge",l:"Bridge"}
+    {k:"bridge",l:"Info"}
   ];
 
   document.getElementById("app").innerHTML = `
   <div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 0 14px;border-bottom:0.5px solid var(--color-border-tertiary);margin-bottom:14px;flex-wrap:wrap;gap:8px">
     <div>
       <div class="mono" style="font-size:17px;font-weight:500;color:var(--color-text-primary)">ORMUZ COMMAND CENTER</div>
-      <div style="font-size:11px;color:var(--color-text-secondary);margin-top:2px">Infraestrutura distribuída — monitoramento marítimo + economia em blockchain</div>
+      <div style="font-size:11px;color:var(--color-text-secondary);margin-top:2px">Simulador Integrado (100% In-Browser)</div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       ${[
@@ -764,27 +761,16 @@ function render() {
         <div style="font-size:9px;color:var(--color-text-tertiary);margin-bottom:2px">${x.l}</div>
         <div class="mono" style="font-size:18px;font-weight:500;color:${x.c};line-height:1">${x.v}</div>
       </div>`).join("")}
-      <div style="background:${conectado?"var(--color-background-success)":"var(--color-background-secondary)"};border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:5px 10px;text-align:center;cursor:pointer" onclick="STATE.tab='bridge';render()">
-        <div style="font-size:9px;color:var(--color-text-tertiary);margin-bottom:2px">STATUS</div>
-        <div class="mono" style="font-size:12px;font-weight:500;color:${conectado?"var(--color-text-success)":S.wsStatus==="error"?"var(--color-text-danger)":"var(--color-text-warning)"}">${conectado?"REAL":S.wsStatus==="error"?"ERRO":"OFFLINE"}</div>
+      <div style="background:var(--color-background-info);border:0.5px solid var(--color-border-info);border-radius:var(--border-radius-md);padding:5px 10px;text-align:center;">
+        <div style="font-size:9px;color:var(--color-text-info);margin-bottom:2px">STATUS</div>
+        <div class="mono" style="font-size:12px;font-weight:500;color:var(--color-text-info)">SIMULAÇÃO COMPLETA</div>
       </div>
     </div>
   </div>
 
-  <div style="margin-bottom:14px;padding:9px 12px;border-radius:var(--border-radius-md);font-size:11px;
-    background:${conectado?"var(--color-background-success)":"var(--color-background-warning)"};
-    border:0.5px solid ${conectado?"var(--color-border-success)":"var(--color-border-warning)"};
-    color:${conectado?"var(--color-text-success)":"var(--color-text-warning)"}">
-    ${conectado
-      ? "🔗 Bridge conectada — a aba 📊 Auditoria mostra saldos, transferências e histórico REAIS do Hyperledger Fabric."
-      : "🧪 Mapa tático, fila e drones abaixo são uma simulação OFFLINE do algoritmo de prioridade/timeout — não tocam o ledger e não inventam saldo. Para ver dados financeiros reais, conecte a Bridge."}
-  </div>
-
   <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1fr);gap:12px">
 
-    <!-- Coluna 1: mapa + drones + tabela de prioridades -->
     <div style="display:flex;flex-direction:column;gap:10px">
-
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <span style="font-size:13px;font-weight:500">Mapa Tático</span>
@@ -794,7 +780,7 @@ function render() {
           </div>
         </div>
         ${renderMap()}
-        <div style="margin-top:4px;font-size:9px;color:var(--color-text-tertiary)">Saldo só aparece após consulta real no Fabric (aba Auditoria) · ▲ = drones</div>
+        <div style="margin-top:4px;font-size:9px;color:var(--color-text-tertiary)">▲ = drones</div>
       </div>
 
       <div class="card">
@@ -815,7 +801,6 @@ function render() {
       </div>
     </div>
 
-    <!-- Coluna 2: fila + log de eventos -->
     <div style="display:flex;flex-direction:column;gap:10px">
       <div class="card" style="flex:none">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -847,7 +832,6 @@ function render() {
       </div>
     </div>
 
-    <!-- Coluna 3: painel de controle com 5 abas -->
     <div style="display:flex;flex-direction:column;gap:10px">
       <div class="card">
         <div style="display:grid;grid-template-columns:repeat(5,1fr);margin:-12px -12px 12px;border-bottom:0.5px solid var(--color-border-tertiary)">
@@ -859,7 +843,6 @@ function render() {
   </div>`;
 }
 
-// Expõe globalmente para os handlers onclick
 window.STATE=STATE;
 window.render=render;
 window.injectAlert=injectAlert;
@@ -869,19 +852,14 @@ window.addDrone=addDrone;
 window.killDrone=killDrone;
 window.reviveDrone=reviveDrone;
 window.removeDrone=removeDrone;
-window.connectWs=connectWs;
 window.processQueue=processQueue;
 window.killBase=killBase;
 window.reviveBase=reviveBase;
 window.chamarFabric=chamarFabric;
 window.EMPRESAS=EMPRESAS;
 
-// INIT
-log("Sistema ORMUZ COMMAND CENTER iniciado","success");
-log("4 bases ativas: NORTE, SUL, LESTE, OESTE","info");
-log("4 drones registrados e prontos","info");
-log("Modo OFFLINE: fila/prioridade/timeout simulados localmente — nenhum dado financeiro é inventado","warn");
-log("Conecte a aba Bridge para ver saldos, transferências e auditoria reais do Hyperledger Fabric","info");
+log("Sistema ORMUZ COMMAND CENTER iniciado", "success");
+log("Modo Standalone: Toda a lógica do Fabric agora está a ser executada no navegador.", "info");
 
 render();
 startAutoSim();

@@ -157,26 +157,7 @@ func (s *SmartContract) TransferirTokens(ctx contractapi.TransactionContextInter
 	return &RespostaTransacao{Sucesso: true, Motivo: "Transferencia concluida com sucesso", SaldoRestante: carteiraOrigem.Saldo}, nil
 }
 
-// ── 2. PAGAMENTO ANTES DO DESPACHO + LAUDO IMUTÁVEL DEPOIS DA MISSÃO ────────
-//
-// Antes: o débito acontecia só em RegistrarConclusao, ou seja, DEPOIS do drone
-// já ter feito a missão inteira. Isso violava a regra "drone só é despachado
-// após confirmação do pagamento" e abria brecha para múltiplas requisições da
-// mesma empresa serem aceitas e despachadas mesmo sem saldo suficiente para
-// todas (só a 1ª conclusão conseguia debitar; as demais "trabalhavam de
-// graça"). Agora dividimos em duas transações atômicas:
-//
-//   1) AutorizarPagamento — chamada pela Base ANTES de despachar o drone.
-//      Debita a carteira e grava um recibo imutável em "PAG_"+idRequisicao.
-//      É idempotente: se a mesma requisição passar aqui de novo (ex.: drone
-//      caiu e a missão foi reemitida para outra base), não cobra de novo.
-//
-//   2) RegistrarLaudo — chamada quando a missão termina. Só grava o laudo se
-//      já existir uma autorização de pagamento para aquela requisição —
-//      nunca debita nada.
 
-// AutorizarPagamento debita o custo da missão da carteira da empresa ANTES
-// do drone ser despachado. Retorna sucesso=false se não houver saldo.
 func (s *SmartContract) AutorizarPagamento(ctx contractapi.TransactionContextInterface, idRequisicao string, idEmpresa string, custoStr string) (*RespostaTransacao, error) {
 	chavePagamento := "PAG_" + idRequisicao
 
@@ -276,7 +257,6 @@ func (s *SmartContract) RegistrarLaudo(ctx contractapi.TransactionContextInterfa
 	return &RespostaTransacao{Sucesso: true, Motivo: "OK"}, nil
 }
 
-// ── 3. TRANSPARÊNCIA E AUDITABILIDADE ──────────────────────────────────────
 
 // AuditoriaEmpresa busca todo o histórico de alterações no saldo da empresa
 func (s *SmartContract) AuditoriaEmpresa(ctx contractapi.TransactionContextInterface, idEmpresa string) (string, error) {
@@ -316,8 +296,6 @@ func (s *SmartContract) AuditoriaEmpresa(ctx contractapi.TransactionContextInter
 	resultadoJSON, _ := json.Marshal(resultado)
 	return string(resultadoJSON), nil
 }
-
-// ── PONTO DE ENTRADA ───────────────────────────────────────────────────────
 
 func main() {
 	chaincode, err := contractapi.NewChaincode(&SmartContract{})

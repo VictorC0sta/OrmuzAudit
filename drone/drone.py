@@ -1,13 +1,3 @@
-"""
-drone.py — Componente Drone do sistema Ormuz Command Center.
-
-Papel na arquitetura:
-    O drone é um nó trabalhador (worker). Ele se registra em uma base,
-    envia telemetria constante (heartbeats via UDP) para avisar que está vivo,
-    e fica escutando (via TCP) por comandos de missão.
-    Toda a execução de missão é feita em uma thread separada para não
-    bloquear a escuta de novas mensagens.
-"""
 
 import os
 import random
@@ -30,7 +20,7 @@ from protocolo import (
     udp_enviar
 )
 
-# ── Configuração de Logging ───────────────────────────────────────────────────
+#Configuração de Logging 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -38,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("drone")
 
-# ── Configurações via Variáveis de Ambiente ───────────────────────────────────
+#Configurações via Variáveis de Ambiente
 # Identificação do drone e sua base controladora
 DRONE_ID = os.environ.get("DRONE_ID", "DRONE-NORTE-1")
 BASE_ORIGEM = os.environ.get("BASE_ORIGEM", "NORTE")
@@ -56,14 +46,8 @@ MISSAO_DURACAO_MAX = float(os.environ.get("MISSAO_DURACAO_MAX", "20"))
 MAX_TENTATIVAS = int(os.environ.get("MAX_TENTATIVAS", "5"))
 
 
-# ── Controle de Estado Local ──────────────────────────────────────────────────
+#Controle de Estado Local 
 class Drone:
-    """
-    Gerencia o estado do drone (LIVRE ou OCUPADO).
-    Utiliza um Lock de thread (mutex) para garantir que alterações 
-    de estado sejam atômicas, evitando inconsistências se mensagens 
-    chegarem exatamente ao mesmo tempo.
-    """
     def __init__(self):
         self.estado = EstadoDrone.LIVRE
         self.id_requisicao_atual = None
@@ -91,14 +75,9 @@ class Drone:
 drone = Drone()
 
 
-# ── Funções de Comunicação e Negócio ──────────────────────────────────────────
+#Funções de Comunicação e Negócio 
 
 def registrar_na_base():
-    """
-    Envia uma mensagem TCP para a base avisando que o drone ligou.
-    Implementa um mecanismo de "Exponential Backoff" (espera progressiva):
-    se a base estiver offline, ele tenta de novo dobrando o tempo de espera.
-    """
     msg = MensagemRegistro(
         drone_id=DRONE_ID,
         base_id=BASE_ORIGEM,
@@ -125,11 +104,6 @@ def registrar_na_base():
 
 
 def enviar_heartbeat():
-    """
-    Loop infinito rodando em thread separada.
-    Envia pacotes UDP periodicamente para a base contendo o estado 
-    atual do drone. A base usa isso para saber se o drone caiu.
-    """
     logger.info("[%s] Heartbeat iniciado", DRONE_ID)
 
     while True:
@@ -145,11 +119,6 @@ def enviar_heartbeat():
 
 
 def executar_missao(dados_missao):
-    """
-    Simula o voo e o atendimento de uma ocorrência.
-    Recebe os dados da base, trava o estado do drone, aguarda um tempo 
-    aleatório (simulando a viagem) e depois avisa a base que terminou.
-    """
     id_req = dados_missao.get("id_requisicao", "?")
     setor = dados_missao.get("setor_id", "?")
     tipo = dados_missao.get("tipo_ocorrencia", "?")
@@ -185,10 +154,6 @@ def executar_missao(dados_missao):
 
 
 def loop_servidor_tcp():
-    """
-    Mantém o drone escutando comandos (ex: iniciar nova missão) que 
-    chegam da base. Executa continuamente na thread principal.
-    """
     servidor = criar_servidor_tcp(PORTA_HEARTBEAT)
     logger.info("[%s] Servidor TCP iniciado na porta %d", DRONE_ID, PORTA_HEARTBEAT)
 
@@ -225,7 +190,6 @@ def loop_servidor_tcp():
             logger.error("[%s] Erro no loop TCP: %s", DRONE_ID, e, exc_info=True)
 
 
-# ── Ponto de Entrada ──────────────────────────────────────────────────────────
 
 def main():
     """Inicializa o drone, registra na base, inicia telemetria e o servidor TCP."""

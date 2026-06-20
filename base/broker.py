@@ -1,7 +1,3 @@
-"""
-broker.py — Broker de Base (Ormuz Command Center)
-"""
-
 import os
 import sys
 import time
@@ -69,22 +65,13 @@ def _tentar_aceitar(id_requisicao: str) -> None:
     if not entrada: return
     empresa_id = getattr(entrada, "empresa_id", "DESCONHECIDA")
     custo = calcular_custo(str(entrada.criticidade))
-
-    # Exclusão mútua local: reserva a requisição para esta base antes de
-    # gastar tempo de rede com o ledger (mesma garantia de antes, via Lock).
     if not estado.marcar_aceita(id_requisicao): return
 
-    # ── PAGAMENTO ANTES DO DESPACHO ──────────────────────────────────────
-    # O drone só é ocupado/despachado se o ledger confirmar o débito agora.
-    # Isso fecha a brecha em que o serviço era prestado e o pagamento só
-    # era checado/feito na conclusão da missão (tarde demais para evitar
-    # que uma empresa sem saldo já tivesse consumido um drone).
-   # ── PAGAMENTO E PREVENÇÃO DE DUPLO DESPACHO ──────────────────────────
-    pago, motivo, transacao_inedita = ledger_client.autorizar_pagamento(id_requisicao, empresa_id, custo)
     
+    pago, motivo, _, saldo_restante = ledger_client.autorizar_pagamento(id_requisicao, empresa_id, custo)
     if not pago:
         logger.warning(
-            "[%s] Pagamento NEGADO para req %s (empresa %s, custo %d): %s — missao cancelada",
+            "[%s] Pagamento NEGADO para req %s (empresa %s, custo %d): %s — missao cancelada, drone NAO despachado",
             BASE_ID, id_requisicao[:8], empresa_id, custo, motivo,
         )
         with estado.fila_lock:
@@ -95,13 +82,14 @@ def _tentar_aceitar(id_requisicao: str) -> None:
         })
         return
 
-    is_reemissao = getattr(entrada, "is_reemissao", False)
-
-    if not transacao_inedita and not is_reemissao:
-        logger.info("[%s] Corrida P2P detectada! O Ledger avisou que a missão %s já foi paga por outra base. Abortando despacho local.", BASE_ID, id_requisicao[:8])
-        with estado.fila_lock:
-            entrada.status = StatusRequisicao.PENDENTE.value
-        return
+    # Débito de verdade aconteceu agora no ledger — avisa o painel pra
+    # atualizar o saldo exibido no Mapa Tático sem precisar de consulta manual.
+    if saldo_restante is not None:
+        notificar_monitor({
+            "tipo": "SALDO_ATUALIZADO",
+            "empresa": empresa_id,
+            "saldo": saldo_restante,
+        })
 
     estado.ocupar_drone(drone.drone_id, id_requisicao)
     logger.info(
@@ -177,10 +165,6 @@ def _processar_heartbeat_tcp(msg: dict) -> None:
 
         if entrada:
             empresa_id = getattr(entrada, 'empresa_id', "DESCONHECIDA")
-
-            # O pagamento JÁ foi feito em autorizar_pagamento(), antes do
-            # despacho. Aqui só registramos o laudo imutável da missão —
-            # nenhum token é movido nesta etapa.
             sucesso, motivo = ledger_client.registrar_laudo(
                 id_requisicao=missao_concluida,
                 drone_id=drone_id,
@@ -204,22 +188,15 @@ def _processar_reemissao(msg: dict) -> None:
     id_req, id_setor = msg.get("id_requisicao", ""), msg.get("id_setor", "")
     clock.atualizar(msg.get("timestamp_logico_base", 0))
     estado.remover_vista(id_req)
-    
     entrada = estado.obter_entrada(id_req)
     if entrada:
-        with estado.fila_lock: 
-            entrada.status = StatusRequisicao.PENDENTE.value
-        setattr(entrada, "is_reemissao", True)
+        with estado.fila_lock: entrada.status = StatusRequisicao.PENDENTE.value
     else:
         nova = EntradaFila(
-            id_requisicao=id_req, 
-            id_setor=id_setor, 
-            timestamp_logico=msg.get("timestamp_logico", 0),
-            criticidade=msg.get("criticidade", Criticidade.BAIXA.value), 
-            tipo_ocorrencia=msg.get("tipo_ocorrencia", ""),
+            id_requisicao=id_req, id_setor=id_setor, timestamp_logico=msg.get("timestamp_logico", 0),
+            criticidade=msg.get("criticidade", Criticidade.BAIXA.value), tipo_ocorrencia=msg.get("tipo_ocorrencia", ""),
         )
         setattr(nova, "empresa_id", msg.get("empresa_id", "DESCONHECIDA"))
-        setattr(nova, "is_reemissao", True)
         estado.inserir_na_fila(nova)
 
     # OBS: se esta requisição já tinha pagamento autorizado (caso comum de
@@ -227,8 +204,7 @@ def _processar_reemissao(msg: dict) -> None:
     # de _tentar_aceitar() é idempotente no chaincode e NÃO cobra de novo.
     timeout_s = prioridade.timeout_para_setor(id_setor)
     timer = threading.Timer(timeout_s, _tentar_aceitar, args=(id_req,))
-    with _timers_lock: 
-        _timers[id_req] = timer
+    with _timers_lock: _timers[id_req] = timer
     timer.start()
 
 def _processar_fila_pendente() -> None:
@@ -252,10 +228,8 @@ def _tratar_drone_perdido(drone_id: str) -> None:
         # ocorreu antes do despacho). A reemissão abaixo NÃO vai cobrar de novo —
         # ela só busca um novo drone para terminar uma missão já paga.
         with estado.fila_lock: entrada.status = StatusRequisicao.PENDENTE.value
-        setattr(entrada, "is_reemissao", True)  
         reemissao = {
             "tipo": TipoMensagem.REEMISSAO.value, "id_requisicao": entrada.id_requisicao,
-         "id_requisicao": entrada.id_requisicao,
             "id_setor": entrada.id_setor, "timestamp_logico": entrada.timestamp_logico,
             "criticidade": entrada.criticidade, "tipo_ocorrencia": entrada.tipo_ocorrencia,
             "timestamp_logico_base": clock.incrementar(), "empresa_id": getattr(entrada, "empresa_id", "")

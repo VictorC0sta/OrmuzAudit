@@ -1,30 +1,3 @@
-"""
-teste_duplo_gasto_ledger.py — Prova que o LEDGER (Hyperledger Fabric) impede
-duplo gasto de verdade, não apenas a fila local de drones.
-
-Diferença do teste/teste_concorrencia.py: aquele testa só a exclusao mutua
-da FilaReplicada em memoria (Problema 2). Este aqui dispara duas chamadas
-REAIS de AutorizarPagamento no chaincode, ao mesmo tempo, pra mesma
-carteira, com saldo insuficiente pra autorizar as duas. So uma pode passar
-— a prova fica registrada no proprio ledger.
-
-Cenario:
-    1. Cria uma carteira de teste com saldo pequeno e conhecido (10 tokens).
-    2. Dispara DUAS requisicoes diferentes (id_requisicao distintos) tentando
-       debitar 6 tokens cada da MESMA carteira, ao mesmo tempo (threads).
-    3. Consulta o saldo final: se sobrou 4 (10-6), so uma passou — duplo
-       gasto PREVENIDO. Se sobrasse -2 (10-12), seria um duplo gasto real
-       (bug grave). Isso nunca deve acontecer, pois o Fabric usa controle
-       de versao (MVCC) na escrita da chave da carteira.
-
-Requisitos:
-    - Rede Fabric já no ar (fabric/setup.sh executado).
-    - Container 'cli' acessível via 'docker exec' (execute este script do
-      mesmo host/PC onde você roda init_ledger.sh / transferir.sh).
-
-Uso:
-    python teste/teste_duplo_gasto_ledger.py
-"""
 import json
 import re
 import subprocess
@@ -34,11 +7,22 @@ import time
 import uuid
 from typing import Dict, Optional
 
+# --- CAMINHOS DOS CERTIFICADOS DENTRO DO CONTAINER CLI ---
 ORDERER_CA = (
     "/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/"
     "ordererOrganizations/ormuz.com/orderers/orderer1.ormuz.com/tls/ca.crt"
 )
-PEER_ADDRESSES = ["peer0.norte.ormuz.com:7051", "peer0.sul.ormuz.com:8051"]
+
+PEER_CA_NORTE = (
+    "/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/"
+    "peerOrganizations/norte.ormuz.com/peers/peer0.norte.ormuz.com/tls/ca.crt"
+)
+
+PEER_CA_SUL = (
+    "/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/"
+    "peerOrganizations/sul.ormuz.com/peers/peer0.sul.ormuz.com/tls/ca.crt"
+)
+# ---------------------------------------------------------
 
 SALDO_INICIAL = 10
 CUSTO_CADA = 6  # 2 x 6 = 12 > 10 -> as duas NUNCA podem passar
@@ -49,7 +33,9 @@ def _chaincode_args(funcao: str, *args: str) -> str:
 
 
 def _docker_exec(args: list) -> "subprocess.CompletedProcess":
-    return subprocess.run(["docker", "exec", "cli"] + args, capture_output=True, text=True)
+    # INJETAMOS O CERTIFICADO DIRETAMENTE NA CHAMADA PARA O CLI NÃO SE PERDER
+    cmd = ["docker", "exec", "-e", f"CORE_PEER_TLS_ROOTCERT_FILE={PEER_CA_NORTE}", "cli"] + args
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 
 def criar_carteira_teste(empresa_id: str, saldo: int) -> None:
@@ -60,13 +46,16 @@ def criar_carteira_teste(empresa_id: str, saldo: int) -> None:
         "-n", "token_contract",
         "--tls", "true",
         "--cafile", ORDERER_CA,
+        # EXIGINDO ASSINATURAS DO NORTE E SUL PARA A CARTEIRA NASCER DE FATO NO LEDGER
+        "--peerAddresses", "peer0.norte.ormuz.com:7051", "--tlsRootCertFiles", PEER_CA_NORTE,
+        "--peerAddresses", "peer0.sul.ormuz.com:8051", "--tlsRootCertFiles", PEER_CA_SUL,
         "-c", _chaincode_args("CriarCarteira", empresa_id, str(saldo)),
     ]
     resultado = _docker_exec(cmd)
     if resultado.returncode != 0:
         print(resultado.stderr)
         raise RuntimeError(f"Falha ao criar carteira de teste '{empresa_id}'. "
-                            f"A rede Fabric esta no ar? (fabric/setup.sh)")
+                           f"A rede Fabric esta no ar? (fabric/setup.sh)")
     print(f"  Carteira de teste '{empresa_id}' criada com saldo={saldo}")
 
 
@@ -86,11 +75,6 @@ def consultar_saldo(empresa_id: str) -> int:
 
 
 def _extrair_payload(saida: str) -> Optional[dict]:
-    """Tenta achar o JSON de retorno embutido no log do 'peer chaincode invoke'.
-    Se o formato da sua versao do Fabric for diferente e isso falhar, a
-    saida bruta ainda é impressa no relatorio final pra inspecao manual —
-    a conclusao do teste depende do saldo final consultado, nao deste parser.
-    """
     m = re.search(r'payload:"(.*?)"\s*$', saida.strip(), re.MULTILINE)
     if not m:
         return None
@@ -102,15 +86,18 @@ def _extrair_payload(saida: str) -> Optional[dict]:
 
 
 def autorizar_pagamento(id_requisicao: str, empresa_id: str, custo: int,
-                         resultados: Dict[str, dict], chave: str) -> None:
+                        resultados: Dict[str, dict], chave: str) -> None:
     cmd = ["peer", "chaincode", "invoke",
            "-o", "orderer1.ormuz.com:7050",
            "-C", "ormuz-channel",
            "-n", "token_contract",
            "--tls", "true",
            "--cafile", ORDERER_CA]
-    for addr in PEER_ADDRESSES:
-        cmd += ["--peerAddresses", addr]
+
+    # EXIGINDO ASSINATURAS DO NORTE E SUL PARA A TRANSFERÊNCIA
+    cmd += ["--peerAddresses", "peer0.norte.ormuz.com:7051", "--tlsRootCertFiles", PEER_CA_NORTE]
+    cmd += ["--peerAddresses", "peer0.sul.ormuz.com:8051", "--tlsRootCertFiles", PEER_CA_SUL]
+
     cmd += ["-c", _chaincode_args("AutorizarPagamento", id_requisicao, empresa_id, str(custo))]
 
     inicio = time.time()
@@ -143,7 +130,7 @@ def main() -> None:
 
     print("[1/3] Criando carteira de teste...")
     criar_carteira_teste(empresa_teste, SALDO_INICIAL)
-    time.sleep(1)  # deixa o bloco da criacao confirmar antes da corrida
+    time.sleep(2)  # Aumentei para 2s para garantir que os peers sincronizem o bloco antes da corrida
 
     print("\n[2/3] Disparando DUAS requisicoes SIMULTANEAS contra a mesma carteira...")
     print(f"   thread A -> id_requisicao={req_a}")
@@ -165,7 +152,7 @@ def main() -> None:
         print(f"  Requisicao {chave}: codigo_saida={r['returncode']} | tempo={r['duracao_s']}s | sucesso={sucesso} | motivo={motivo}")
 
     print("\n[3/3] Consultando saldo final no ledger...")
-    time.sleep(1)
+    time.sleep(2) # Mais 2s para o orderer confirmar os blocos de transação
     saldo_final = consultar_saldo(empresa_teste)
     print(f"  Saldo final de {empresa_teste}: {saldo_final} tokens\n")
 
@@ -189,12 +176,6 @@ def main() -> None:
         print(f"  RESULTADO inesperado (saldo final={saldo_final}).")
         print("  Verifique manualmente a saida bruta de cada chamada abaixo.")
     print("=" * 64)
-
-    print("\n--- Saida bruta da requisicao A (ultimas linhas) ---")
-    print(resultados["A"]["saida_bruta"][-600:])
-    print("\n--- Saida bruta da requisicao B (ultimas linhas) ---")
-    print(resultados["B"]["saida_bruta"][-600:])
-
 
 if __name__ == "__main__":
     main()

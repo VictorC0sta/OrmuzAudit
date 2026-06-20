@@ -1,6 +1,6 @@
 # =============================================================
 #  PC 2 — Brokers de Base (Norte, Sul, Leste, Oeste)
-#  Rodar com: docker compose -f docker-compose.bases.yml up
+#  Rodar com: docker compose -f docker-compose.bases.yml up -d
 # =============================================================
 
 services:
@@ -14,6 +14,7 @@ services:
       - "${PORTA_BASE_NORTE}:${PORTA_BASE_NORTE}"
       - "${PORTA_BASE_NORTE_UDP}:${PORTA_BASE_NORTE_UDP}/udp"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       BASE_ID: "NORTE"
       MINHA_PORTA: "${PORTA_BASE_NORTE}"
       MINHA_PORTA_UDP: "${PORTA_BASE_NORTE_UDP}"
@@ -27,12 +28,12 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       IP_PC_DRONES: "${IP_PC_DRONES}"
-      FABRIC_ORG_DOMAIN: "norte.ormuz.com"
+      FABRIC_ORG_DOMAIN: "OrgNorte"
       FABRIC_USER: "Admin"
-      # NOVA LISTA DE PEERS PARA ENDOSSO (Norte pede a todos)
       FABRIC_PEERS: "peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.leste.ormuz.com,peer0.oeste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
       - ormuz_fabric
@@ -47,6 +48,7 @@ services:
       - "${PORTA_BASE_SUL}:${PORTA_BASE_SUL}"
       - "${PORTA_BASE_SUL_UDP}:${PORTA_BASE_SUL_UDP}/udp"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       BASE_ID: "SUL"
       MINHA_PORTA: "${PORTA_BASE_SUL}"
       MINHA_PORTA_UDP: "${PORTA_BASE_SUL_UDP}"
@@ -60,12 +62,12 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       IP_PC_DRONES: "${IP_PC_DRONES}"
-      FABRIC_ORG_DOMAIN: "sul.ormuz.com"
+      FABRIC_ORG_DOMAIN: "OrgSul"
       FABRIC_USER: "Admin"
-      # NOVA LISTA DE PEERS PARA ENDOSSO (Sul pede a todos)
       FABRIC_PEERS: "peer0.sul.ormuz.com,peer0.norte.ormuz.com,peer0.leste.ormuz.com,peer0.oeste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
       - ormuz_fabric
@@ -80,6 +82,7 @@ services:
       - "${PORTA_BASE_LESTE}:${PORTA_BASE_LESTE}"
       - "${PORTA_BASE_LESTE_UDP}:${PORTA_BASE_LESTE_UDP}/udp"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       BASE_ID: "LESTE"
       MINHA_PORTA: "${PORTA_BASE_LESTE}"
       MINHA_PORTA_UDP: "${PORTA_BASE_LESTE_UDP}"
@@ -93,12 +96,12 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       IP_PC_DRONES: "${IP_PC_DRONES}"
-      FABRIC_ORG_DOMAIN: "leste.ormuz.com"
+      FABRIC_ORG_DOMAIN: "OrgLeste"
       FABRIC_USER: "Admin"
-      # NOVA LISTA DE PEERS PARA ENDOSSO (Leste pede a todos)
       FABRIC_PEERS: "peer0.leste.ormuz.com,peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.oeste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
       - ormuz_fabric
@@ -113,6 +116,7 @@ services:
       - "${PORTA_BASE_OESTE}:${PORTA_BASE_OESTE}"
       - "${PORTA_BASE_OESTE_UDP}:${PORTA_BASE_OESTE_UDP}/udp"
     environment:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: "python"
       BASE_ID: "OESTE"
       MINHA_PORTA: "${PORTA_BASE_OESTE}"
       MINHA_PORTA_UDP: "${PORTA_BASE_OESTE_UDP}"
@@ -126,12 +130,12 @@ services:
       PORTA_BASE_LESTE: "${PORTA_BASE_LESTE}"
       PORTA_BASE_OESTE: "${PORTA_BASE_OESTE}"
       IP_PC_DRONES: "${IP_PC_DRONES}"
-      FABRIC_ORG_DOMAIN: "oeste.ormuz.com"
+      FABRIC_ORG_DOMAIN: "OrgOeste"
       FABRIC_USER: "Admin"
-      # NOVA LISTA DE PEERS PARA ENDOSSO (Oeste pede a todos)
       FABRIC_PEERS: "peer0.oeste.ormuz.com,peer0.norte.ormuz.com,peer0.sul.ormuz.com,peer0.leste.ormuz.com"
     volumes:
       - ../fabric/crypto-config:/app/fabric/crypto-config:ro
+      - ../fabric/connection-profile.json:/app/fabric/connection-profile.json:ro
     networks:
       - ormuz_net
       - ormuz_fabric
@@ -141,3 +145,4 @@ networks:
     driver: bridge
   ormuz_fabric:
     external: true
+    name: docker_ormuz_fabric
